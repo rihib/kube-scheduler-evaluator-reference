@@ -24,7 +24,8 @@ func main() {
 		evaluator.WithMetricStores(
 			definition.NewMetricStore(definition.VictoriaMetrics, "http://localhost:8428"),
 		),
-		evaluator.WithScenario(example.Name, 3, example.Generator, nil),         // scenarioName, iteration, scenarioGenerator
+		// scenarioName, iteration, scenarioGenerator, schedulerRegistry, schedulerOptions
+		evaluator.WithScenario(example.Name, 3, example.Generator, nil),
 		evaluator.WithScenario(clusterdata.Name, 1, clusterdata.Generator, nil), // alibaba clusterdata gpu2023
 	)
 	if err != nil {

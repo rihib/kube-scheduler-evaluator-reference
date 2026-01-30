@@ -1,10 +1,15 @@
-COMPOSE := compose.yaml
+BASE := docker/compose.yaml
+EXT := docker/compose.ext.yaml
 
 .PHONY: all
-all: run
+all: down up run
+
+.PHONY: open
+open:
+	@open http://localhost:3000
 
 .PHONY: ext
-ext: down up run
+ext: down up-ext run
 
 .PHONY: build
 build: bin/kube-scheduler-evaluator
@@ -25,13 +30,18 @@ run: build
 
 .PHONY: up
 up:
-	docker compose -f $(COMPOSE) up --build -d
+	docker compose -f $(BASE) up --build -d
 # Wait for kube-scheduler to be ready
+	@sleep 3
+
+.PHONY: up-ext
+up-ext:
+	docker compose -f $(BASE) -f $(EXT) up --build -d
 	@sleep 5
 
 .PHONY: down
 down:
-	docker compose -f $(COMPOSE) down
+	docker compose -f $(BASE) -f $(EXT) down
 
 .PHONY: clean
 clean: down
