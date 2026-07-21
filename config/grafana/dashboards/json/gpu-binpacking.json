@@ -1,0 +1,72 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "description": "Requested GPUs divided by allocatable GPUs. Best-fit reaches 100% because the later 4-GPU Pod can start immediately; the current-utilization scorer leaves it Pending until space is released.",
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "stepAfter", "lineWidth": 3, "pointSize": 5, "showPoints": "always", "spanNulls": false}, "max": 100, "min": 0, "unit": "percent"},
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": "/.*best-fit.*/"}, "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]},
+          {"matcher": {"id": "byRegexp", "options": "/.*utilization.*/"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]}
+        ]
+      },
+      "gridPos": {"h": 10, "w": 16, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"calcs": ["max", "mean"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "victoriametrics"}, "editorMode": "code", "expr": "gpu_allocation_percent{scope=\"cluster\",evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}", "legendFormat": "{{scenario_id}}", "range": true, "refId": "A"}],
+      "title": "Cluster GPU allocation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "description": "The best-fit score preserves the 4-GPU slot on gpu-large by placing the 1-GPU filler on gpu-small.",
+      "gridPos": {"h": 10, "w": 8, "x": 16, "y": 0},
+      "id": 2,
+      "options": {"content": "## Expected decision\n\n`seed-4gpu` → **gpu-large** in both runs\n\nCurrent utilization: `filler-1gpu` → **gpu-large**\n\nBest-fit: `filler-1gpu` → **gpu-small**\n\nResult: `workload-4gpu` waits only in the current-utilization run.\n\n> This dashboard reports GPU **requests allocated by the scheduler**, not physical device activity measured by DCGM.", "mode": "markdown"},
+      "title": "How to read the demo",
+      "type": "text"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 5, "lineInterpolation": "stepAfter", "lineWidth": 2, "pointSize": 4, "showPoints": "auto"}, "min": 0, "unit": "none"}, "overrides": []},
+      "gridPos": {"h": 10, "w": 12, "x": 0, "y": 10},
+      "id": 3,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "victoriametrics"}, "editorMode": "code", "expr": "gpu_allocated_gpus{scope=\"cluster\",evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}", "legendFormat": "{{scenario_id}}", "range": true, "refId": "A"}],
+      "title": "Allocated GPUs",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 5, "lineInterpolation": "stepAfter", "lineWidth": 2, "pointSize": 4, "showPoints": "auto"}, "min": 0, "unit": "none"}, "overrides": []},
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 10},
+      "id": 4,
+      "options": {"legend": {"calcs": ["lastNotNull", "min"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "victoriametrics"}, "editorMode": "code", "expr": "gpu_free_gpus{scope=\"node\",evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}", "legendFormat": "{{scenario_id}} / {{node}}", "range": true, "refId": "A"}],
+      "title": "Free GPUs by node",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": false,
+  "schemaVersion": 39,
+  "tags": ["kube-scheduler-evaluator", "gpu", "bin-packing"],
+  "templating": {
+    "list": [
+      {"current": {}, "datasource": {"type": "prometheus", "uid": "victoriametrics"}, "definition": "label_values(gpu_allocation_percent, evaluation_id)", "hide": 0, "includeAll": false, "label": "Evaluation", "multi": false, "name": "evaluation", "options": [], "query": {"query": "label_values(gpu_allocation_percent, evaluation_id)", "refId": "StandardVariableQuery"}, "refresh": 2, "regex": "", "skipUrlSync": false, "sort": 2, "type": "query"}
+    ]
+  },
+  "time": {"from": "now-5m", "to": "now+60m"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "GPU Bin Packing Demo",
+  "uid": "gpu-binpacking-demo",
+  "version": 1,
+  "weekStart": ""
+}

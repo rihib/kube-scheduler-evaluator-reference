@@ -28,6 +28,23 @@ do-build:
 run: build
 	./bin/kube-scheduler-evaluator
 
+.PHONY: demo
+demo: down up run-demo verify-demo
+
+.PHONY: build-demo
+build-demo: bin/gpu-binpacking-demo
+
+bin/gpu-binpacking-demo: $(shell find . -name '*.go')
+	go build -o bin/gpu-binpacking-demo ./cmd/gpu-binpacking-demo
+
+.PHONY: run-demo
+run-demo: build-demo
+	./bin/gpu-binpacking-demo
+
+.PHONY: verify-demo
+verify-demo:
+	bash ./scripts/verify-gpu-demo.sh
+
 .PHONY: up
 up:
 	docker compose -f $(BASE) up --build -d
