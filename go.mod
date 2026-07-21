@@ -115,7 +115,9 @@ require (
 )
 
 replace (
-	github.com/pfnet/kube-scheduler-evaluator => ../kube-scheduler-evaluator
+	// kube-scheduler-evaluator-reference is expected to be checked out as a git
+	// submodule of kube-scheduler-evaluator, so the evaluator module is the parent directory.
+	github.com/pfnet/kube-scheduler-evaluator => ../
 	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.32.7
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.32.7
 	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.32.7

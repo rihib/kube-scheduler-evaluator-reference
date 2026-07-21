@@ -1,0 +1,208 @@
+{
+  "uid": "gpu-binpacking-demo",
+  "title": "GPU Bin-Packing Demo",
+  "tags": ["kube-scheduler-evaluator", "gpu"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "evaluation",
+        "label": "Evaluation",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+        "query": "label_values(gpu_utilization_percent, evaluation_id)",
+        "refresh": 2,
+        "sort": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]}
+      },
+      {
+        "name": "scenario",
+        "label": "Scenario",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+        "query": "label_values(gpu_utilization_percent{evaluation_id=~\"$evaluation\"}, scenario_id)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "",
+      "gridPos": {"h": 3, "w": 24, "x": 0, "y": 0},
+      "options": {
+        "mode": "markdown",
+        "content": "## GPU Bin-Packing: utilization-percentage vs free-GPU-count\n\nBoth scenarios replay the **same workload** on a cluster with heterogeneous GPU counts (4 nodes x 8 GPUs, 4 nodes x 1 GPU). `scenario-gpu-binpacking-utilization` packs by GPU **utilization %** and fragments the large nodes, leaving jobs pending. `scenario-gpu-binpacking-freecount` packs by **free GPU count** (best fit) and reaches 100% GPU utilization."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Overall GPU Utilization (%)",
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "gridPos": {"h": 10, "w": 16, "x": 0, "y": 3},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "gpu_utilization_percent{evaluation_id=~\"$evaluation\", scenario_id=~\"$scenario\"}",
+          "legendFormat": "{{scenario_id}} (iteration {{iteration}})"
+        }
+      ],
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Peak GPU Utilization",
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "gridPos": {"h": 10, "w": 8, "x": 16, "y": 3},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 85},
+              {"color": "green", "value": 99}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max_over_time(gpu_utilization_percent{evaluation_id=~\"$evaluation\", scenario_id=~\"$scenario\"}[$__range])",
+          "legendFormat": "{{scenario_id}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "values": false},
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Allocated GPUs vs Cluster GPU Capacity",
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 13},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byFrameRefID", "options": "B"},
+            "properties": [
+              {"id": "custom.fillOpacity", "value": 0},
+              {"id": "custom.lineStyle", "value": {"dash": [10, 10], "fill": "dash"}}
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "gpu_allocated_gpus{evaluation_id=~\"$evaluation\", scenario_id=~\"$scenario\"}",
+          "legendFormat": "allocated - {{scenario_id}}"
+        },
+        {
+          "refId": "B",
+          "expr": "gpu_capacity_gpus{evaluation_id=~\"$evaluation\", scenario_id=~\"$scenario\"}",
+          "legendFormat": "capacity - {{scenario_id}}"
+        }
+      ],
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Pending GPU Requests (unschedulable jobs)",
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 13},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "gpu_pending_gpus{evaluation_id=~\"$evaluation\", scenario_id=~\"$scenario\"}",
+          "legendFormat": "pending - {{scenario_id}}"
+        }
+      ],
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    }
+  ]
+}

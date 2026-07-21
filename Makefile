@@ -11,6 +11,26 @@ open:
 .PHONY: ext
 ext: down up-ext run
 
+# GPU bin-packing demo: compares utilization-percentage bin packing against
+# free-GPU-count bin packing on a cluster with heterogeneous GPU counts.
+# `make demo` runs both scenarios back to back. To run them one at a time
+# (e.g. while presenting), run `make up` once and then
+# `make demo-utilization` / `make demo-freecount`.
+.PHONY: demo
+demo: down up run-demo
+
+.PHONY: run-demo
+run-demo: build
+	SCENARIOS=demo ./bin/kube-scheduler-evaluator
+
+.PHONY: demo-utilization
+demo-utilization: build
+	SCENARIOS=demo-utilization ./bin/kube-scheduler-evaluator
+
+.PHONY: demo-freecount
+demo-freecount: build
+	SCENARIOS=demo-freecount ./bin/kube-scheduler-evaluator
+
 .PHONY: build
 build: bin/kube-scheduler-evaluator
 
