@@ -4,14 +4,15 @@ kube-scheduler-evaluator-reference enables you to run reference scenarios locall
 
 ## Quick Start
 
-This repository is checked out as a git submodule of
+Clone this repository side by side with
 [kube-scheduler-evaluator](https://github.com/rihib/kube-scheduler-evaluator)
-(`go.mod` resolves the evaluator from the parent directory, so changes to the
-evaluator are picked up immediately).
+(`go.mod` resolves the evaluator from `../kube-scheduler-evaluator`, so changes
+to the evaluator are picked up immediately).
 
 ```bash
-git clone --recurse-submodules https://github.com/rihib/kube-scheduler-evaluator.git
-cd kube-scheduler-evaluator/kube-scheduler-evaluator-reference
+git clone https://github.com/rihib/kube-scheduler-evaluator.git
+git clone https://github.com/rihib/kube-scheduler-evaluator-reference.git
+cd kube-scheduler-evaluator-reference
 
 make  # Up and run evaluation
 make open  # Grafana dashboard; url: http://localhost:3000, user: admin, password: password
@@ -46,7 +47,7 @@ make demo-freecount    # improved:  packs by free GPU count     (100% peak, noth
 Events are paced at 500ms of real time so the dashboard draws live; override
 with `DEMO_PACE` (e.g. `DEMO_PACE=0s make demo`). See
 [docs/kubecon-demo.md](https://github.com/rihib/kube-scheduler-evaluator/blob/main/docs/kubecon-demo.md)
-in the parent repository for the full demo walkthrough.
+in the kube-scheduler-evaluator repository for the full demo walkthrough.
 
 ## `externalMode`
 
