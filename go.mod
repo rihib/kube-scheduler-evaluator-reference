@@ -115,6 +115,7 @@ require (
 )
 
 replace (
+	// kube-scheduler-evaluator is expected to be cloned side by side with this repository.
 	github.com/pfnet/kube-scheduler-evaluator => ../kube-scheduler-evaluator
 	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.32.7
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.32.7
