@@ -14,6 +14,48 @@ make open  # Grafana dashboard; url: http://localhost:3000, user: admin, passwor
 make clean # Stop and clean up
 ```
 
+## KubeCon demo: Alibaba GPU 2023
+
+The KubeCon dashboard replays the Alibaba GPU 2023 production trace:
+
+- 1,523 heterogeneous cluster nodes
+- 8,152 tasks
+- CPU request utilization and GPU `gpu_milli` request utilization over evaluator virtual time
+- wall-clock completion time, simulated time span, and simulation speedup
+
+Cache the trace once before traveling so that the demo does not depend on venue Wi-Fi:
+
+```bash
+make demo-prepare
+```
+
+Run the complete demo and open its provisioned Grafana dashboard:
+
+```bash
+make demo
+```
+
+After a standalone `make demo-run`, use `make open` (or `make demo-open`).
+It selects the newest evaluation and opens the exact virtual-time interval of
+that run, regardless of the time range or evaluation previously selected in
+Grafana.
+
+For a staged presentation, use separate terminals:
+
+```bash
+# Terminal 1
+make down up
+make demo-run
+
+# Terminal 2, immediately after demo-run starts
+make demo-open
+```
+
+Grafana is available only on `127.0.0.1:3000` with anonymous Viewer access.
+VictoriaMetrics is available only on `127.0.0.1:8428`.
+The CPU and GPU panels show scheduler-visible resource requests, not physical
+device telemetry; the evaluator does not execute the workloads.
+
 ## Scenarios
 
 The kube-scheduler-evaluator-reference implements the following scenarios:

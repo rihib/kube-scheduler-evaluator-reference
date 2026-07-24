@@ -2,13 +2,14 @@ services:
   victoriametrics:
     container_name: evaluator-victoriametrics
     restart: always
-    image: quay.io/victoriametrics/victoria-metrics:stable
+    image: quay.io/victoriametrics/victoria-metrics:v1.145.0
     pull_policy: if_not_present
     command:
       - -storageDataPath=/var/lib/victoria-metrics
       - -retentionPeriod=365d
+      - -futureRetention=365d
     ports:
-      - "8428:8428"
+      - "127.0.0.1:8428:8428"
     volumes:
       - victoriametrics-data:/var/lib/victoria-metrics
 
@@ -18,10 +19,13 @@ services:
     image: grafana/grafana
     pull_policy: if_not_present
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=password
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
     volumes:
       - grafana-data:/var/lib/grafana
       - ../config/grafana:/etc/grafana/provisioning
