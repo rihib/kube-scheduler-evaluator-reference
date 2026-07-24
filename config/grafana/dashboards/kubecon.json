@@ -238,6 +238,7 @@
         "type": "prometheus",
         "uid": "victoriametrics"
       },
+      "description": "Scheduler-visible CPU requests plotted against evaluator virtual time.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -330,7 +331,7 @@
         "type": "prometheus",
         "uid": "victoriametrics"
       },
-      "description": "Uses Alibaba gpu_milli requests, including GPU-sharing workloads.",
+      "description": "Alibaba gpu_milli requests plotted against evaluator virtual time, including GPU-sharing workloads.",
       "fieldConfig": {
         "defaults": {
           "color": {

@@ -2,11 +2,12 @@ services:
   victoriametrics:
     container_name: evaluator-victoriametrics
     restart: always
-    image: quay.io/victoriametrics/victoria-metrics:stable
+    image: quay.io/victoriametrics/victoria-metrics:v1.145.0
     pull_policy: if_not_present
     command:
       - -storageDataPath=/var/lib/victoria-metrics
       - -retentionPeriod=365d
+      - -futureRetention=365d
     ports:
       - "127.0.0.1:8428:8428"
     volumes:

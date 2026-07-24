@@ -3,14 +3,12 @@ EXT := docker/compose.ext.yaml
 CLUSTERDATA_DIR := .cache/clusterdata
 NODE_LIST := $(CLUSTERDATA_DIR)/openb_node_list_all_node.csv
 POD_LIST := $(CLUSTERDATA_DIR)/openb_pod_list_default.csv
-DASHBOARD_URL := http://localhost:3000/d/kubecon-kse/alibaba-gpu-2023
 
 .PHONY: all
 all: down up run
 
 .PHONY: open
-open:
-	@open http://localhost:3000
+open: demo-open
 
 .PHONY: demo
 demo: down up demo-run demo-open
@@ -33,8 +31,8 @@ demo-run: demo-prepare bin/kubecon-demo
 	@echo "Evaluation complete. Opening Grafana with 'make demo-open'."
 
 .PHONY: demo-open
-demo-open:
-	@open "$(DASHBOARD_URL)"
+demo-open: bin/demo-open
+	@./bin/demo-open
 
 .PHONY: ext
 ext: down up-ext run
@@ -47,6 +45,9 @@ bin/kube-scheduler-evaluator: $(shell find . -name '*.go')
 
 bin/kubecon-demo: $(shell find . -name '*.go')
 	go build -o $@ cmd/kubecon/main.go
+
+bin/demo-open: $(shell find cmd/demo-open -name '*.go')
+	go build -o $@ cmd/demo-open/main.go
 
 .PHONY: rebuild
 rebuild:
