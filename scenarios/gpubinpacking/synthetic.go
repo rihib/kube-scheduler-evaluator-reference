@@ -30,6 +30,7 @@ const (
 	nodeInterval       = time.Millisecond
 	podCreationSpan    = 150 * 24 * time.Hour
 	scenarioDuration   = 160 * 24 * time.Hour
+	nodeCleanupAt      = 180 * 24 * time.Hour
 	blockerPodDuration = 60 * 24 * time.Hour
 	largePodDuration   = 20 * 24 * time.Hour
 )
@@ -48,10 +49,13 @@ var (
 )
 
 func generate(ch chan<- definition.Event, schedulerName string) {
+	nodes := make([]*corev1.Node, 0, NodeCount)
 	for i := range NodeCount {
+		node := buildSyntheticNode(i, gpuCapacityForNode(i))
+		nodes = append(nodes, node)
 		ch <- definition.NewEvent(
 			definition.EventTypeCreate,
-			buildSyntheticNode(i, gpuCapacityForNode(i)),
+			node,
 			nodeInterval,
 		)
 	}
@@ -68,6 +72,14 @@ func generate(ch chan<- definition.Event, schedulerName string) {
 			interval,
 		)
 		previousCreation = workload.creation
+	}
+
+	for i, node := range nodes {
+		interval := nodeInterval
+		if i == 0 {
+			interval = nodeCleanupAt - podCreationSpan
+		}
+		ch <- definition.NewEvent(definition.EventTypeDelete, node, interval)
 	}
 }
 

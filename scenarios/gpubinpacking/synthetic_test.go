@@ -12,22 +12,40 @@ import (
 )
 
 func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
-	events := make(chan definition.Event, NodeCount+PodCount)
+	events := make(chan definition.Event, NodeCount*2+PodCount)
 	generate(events, UtilizationScheduler)
 	close(events)
 
-	var nodeCount, podCount int
+	var createdNodeCount, deletedNodeCount, podCount int
 	var allocatableGPU, requestedGPU int64
 	var podCreation, lastPodCreation, lastPodCompletion time.Duration
+	var firstNodeDeletionInterval time.Duration
 	var longRunningPods, blockerPods, largePods int
+	var nodeDeletionBeforeAllPods bool
 	var lifetimes []lifetime
 	for scenarioEvent := range events {
 		switch obj := scenarioEvent.Object().(type) {
 		case *corev1.Node:
-			nodeCount++
-			gpus := obj.Status.Allocatable[corev1.ResourceName("nvidia.com/gpu")]
-			allocatableGPU += gpus.Value()
+			switch scenarioEvent.EventType() {
+			case definition.EventTypeCreate:
+				createdNodeCount++
+				gpus := obj.Status.Allocatable[corev1.ResourceName("nvidia.com/gpu")]
+				allocatableGPU += gpus.Value()
+			case definition.EventTypeDelete:
+				if podCount != PodCount {
+					nodeDeletionBeforeAllPods = true
+				}
+				if deletedNodeCount == 0 {
+					firstNodeDeletionInterval = scenarioEvent.Interval()
+				}
+				deletedNodeCount++
+			default:
+				t.Fatalf("unexpected Node event type %v", scenarioEvent.EventType())
+			}
 		case *appsv1.ReplicaSet:
+			if scenarioEvent.EventType() != definition.EventTypeCreate {
+				t.Fatalf("unexpected ReplicaSet event type %v", scenarioEvent.EventType())
+			}
 			podCount++
 			podCreation += scenarioEvent.Interval()
 			lastPodCreation = podCreation
@@ -59,8 +77,17 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 		}
 	}
 
-	if nodeCount != NodeCount {
-		t.Fatalf("node count = %d, want %d", nodeCount, NodeCount)
+	if createdNodeCount != NodeCount {
+		t.Fatalf("created node count = %d, want %d", createdNodeCount, NodeCount)
+	}
+	if deletedNodeCount != NodeCount {
+		t.Fatalf("deleted node count = %d, want %d", deletedNodeCount, NodeCount)
+	}
+	if nodeDeletionBeforeAllPods {
+		t.Fatal("node deletion occurred before all Pods were submitted")
+	}
+	if want := nodeCleanupAt - podCreationSpan; firstNodeDeletionInterval != want {
+		t.Fatalf("first node deletion interval = %v, want %v", firstNodeDeletionInterval, want)
 	}
 	if podCount != PodCount {
 		t.Fatalf("Pod count = %d, want %d", podCount, PodCount)
@@ -131,7 +158,7 @@ func TestGeneratorsUseTheirSchedulerProfiles(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ch := make(chan definition.Event, NodeCount+PodCount)
+			ch := make(chan definition.Event, NodeCount*2+PodCount)
 			tt.generator(ch)
 			close(ch)
 
