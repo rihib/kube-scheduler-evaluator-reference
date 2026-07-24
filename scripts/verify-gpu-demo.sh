@@ -37,9 +37,9 @@ else:
     if values.get("baseline_minutes") is not None and values.get("best_fit_minutes") is not None:
         raise SystemExit(
             "GPU metrics are missing although Pod metrics exist. "
-            "Run `make build-demo` to rebuild against "
-            "../kube-scheduler-evaluator and confirm both repositories are on "
-            "agent/kubecon-gpu-binpacking-demo. "
+            "The binary was built without the evaluator PR's GPU metric support. "
+            "Switch ../kube-scheduler-evaluator to "
+            "agent/kubecon-gpu-binpacking-demo, then rerun `make demo`. "
             f"Values: {values}"
         )
     raise SystemExit(f"demo metrics did not become queryable: {values}")

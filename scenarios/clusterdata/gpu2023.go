@@ -162,7 +162,11 @@ func podGenerator(ch chan<- definition.Event, schedulerName string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status %s while downloading pod list", resp.Status)
 	}
-	reader := csv.NewReader(resp.Body)
+	return podGeneratorFromReader(ch, schedulerName, resp.Body)
+}
+
+func podGeneratorFromReader(ch chan<- definition.Event, schedulerName string, source io.Reader) error {
+	reader := csv.NewReader(source)
 	reader.FieldsPerRecord = -1
 	reader.TrimLeadingSpace = true
 
@@ -202,6 +206,9 @@ func podGenerator(ch chan<- definition.Event, schedulerName string) error {
 		gpuCount, err := parseIntField(record[3], "num_gpu")
 		if err != nil {
 			return err
+		}
+		if gpuCount == 0 {
+			continue
 		}
 		gpuMilli, err := parseIntField(record[4], "gpu_milli")
 		if err != nil {

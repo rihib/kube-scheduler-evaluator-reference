@@ -16,11 +16,11 @@ make clean # Stop and clean up
 
 ## KubeCon Japan GPU bin-packing demo
 
-The demo replays the complete Alibaba GPU 2023 trace twice: once with the
-current-utilization Score plugin and once with the absolute best-fit plugin.
-Both evaluations therefore process the same 1,523 nodes and 8,152 Pods from the
-real trace. The trace cluster contains 1,213 GPU nodes and 6,212 allocatable
-GPUs.
+The demo replays the GPU workloads from the Alibaba GPU 2023 trace twice: once
+with the current-utilization Score plugin and once with the absolute best-fit
+plugin. Both evaluations therefore process the same 1,523 nodes and 7,064
+GPU-requesting Pods from the real trace. The 1,088 Pods that request no GPU are
+excluded. The trace cluster contains 1,213 GPU nodes and 6,212 allocatable GPUs.
 
 The baseline plugin prefers the node with the highest current GPU allocation
 percentage. The best-fit plugin instead prefers the feasible node with the
@@ -35,6 +35,19 @@ cd kube-scheduler-evaluator-reference
 
 make demo
 make open
+```
+
+If the repositories already exist, `git pull` alone does not switch branches.
+Switch both checkouts explicitly before running the demo:
+
+```bash
+git -C ../kube-scheduler-evaluator fetch origin agent/kubecon-gpu-binpacking-demo
+git -C ../kube-scheduler-evaluator switch agent/kubecon-gpu-binpacking-demo
+git -C ../kube-scheduler-evaluator pull --ff-only
+
+git fetch origin agent/kubecon-gpu-binpacking-demo
+git switch agent/kubecon-gpu-binpacking-demo
+git pull --ff-only
 ```
 
 Open the **Kube Scheduler Evaluator / GPU Bin Packing Demo** dashboard. Select
