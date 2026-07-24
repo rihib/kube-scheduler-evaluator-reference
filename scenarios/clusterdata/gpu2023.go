@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ const (
 	nodeListURL     = "https://raw.githubusercontent.com/alibaba/clusterdata/refs/heads/master/cluster-trace-gpu-v2023/csv/openb_node_list_all_node.csv"
 	podListURL      = "https://raw.githubusercontent.com/alibaba/clusterdata/refs/heads/master/cluster-trace-gpu-v2023/csv/openb_pod_list_default.csv"
 	defaultInterval = time.Second
+	nodeListEnv     = "KSE_NODE_LIST"
+	podListEnv      = "KSE_POD_LIST"
 )
 
 func Generator(ch chan<- definition.Event) {
@@ -41,15 +44,12 @@ func Generator(ch chan<- definition.Event) {
 // sn,cpu_milli,memory_mib,gpu,model
 // openb-node-0229,96000,786432,8,V100M32
 func nodeGenerator(ch chan<- definition.Event) error {
-	resp, err := http.Get(nodeListURL)
+	body, err := openTrace(nodeListEnv, nodeListURL)
 	if err != nil {
-		return fmt.Errorf("failed to download node list: %w", err)
+		return fmt.Errorf("failed to open node list: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status %s while downloading node list", resp.Status)
-	}
-	reader := csv.NewReader(resp.Body)
+	defer body.Close()
+	reader := csv.NewReader(body)
 	reader.FieldsPerRecord = -1
 	reader.TrimLeadingSpace = true
 
@@ -130,15 +130,12 @@ func buildNode(name string, cpuMilli, memoryMiB, gpuCount int64, model string) *
 // name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time
 // openb-pod-0035,16000,32768,1,1000,V100M16|V100M32,LS,Running,9967058,9968575,9967063
 func podGenerator(ch chan<- definition.Event, schedulerName string) error {
-	resp, err := http.Get(podListURL)
+	body, err := openTrace(podListEnv, podListURL)
 	if err != nil {
-		return fmt.Errorf("failed to download pod list: %w", err)
+		return fmt.Errorf("failed to open pod list: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status %s while downloading pod list", resp.Status)
-	}
-	reader := csv.NewReader(resp.Body)
+	defer body.Close()
+	reader := csv.NewReader(body)
 	reader.FieldsPerRecord = -1
 	reader.TrimLeadingSpace = true
 
@@ -256,6 +253,25 @@ func podGenerator(ch chan<- definition.Event, schedulerName string) error {
 	}
 
 	return nil
+}
+
+func openTrace(envName, fallbackURL string) (io.ReadCloser, error) {
+	if path := os.Getenv(envName); path != "" {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("open %s=%q: %w", envName, path, err)
+		}
+		return file, nil
+	}
+	resp, err := http.Get(fallbackURL)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", fallbackURL, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download %s: unexpected status %s", fallbackURL, resp.Status)
+	}
+	return resp.Body, nil
 }
 
 func buildJob(

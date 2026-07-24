@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: kube-scheduler-evaluator
+    orgId: 1
+    folder: KubeCon Demo
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 5
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
