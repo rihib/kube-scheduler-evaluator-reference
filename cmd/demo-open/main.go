@@ -128,6 +128,9 @@ func evaluationRange(
 			scenarioID,
 		),
 	)
+	now := time.Now()
+	query.Set("start", strconv.FormatInt(now.Add(-365*24*time.Hour).UnixMilli(), 10))
+	query.Set("end", strconv.FormatInt(now.Add(365*24*time.Hour).UnixMilli(), 10))
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {

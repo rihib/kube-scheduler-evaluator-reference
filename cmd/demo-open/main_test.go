@@ -65,7 +65,10 @@ func TestLatestEvaluationIDRequiresData(t *testing.T) {
 }
 
 func TestEvaluationRange(t *testing.T) {
+	var start, end string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start = r.URL.Query().Get("start")
+		end = r.URL.Query().Get("end")
 		fmt.Fprintln(w, `{"timestamps":[1700000003000,1700000001000]}`)
 		fmt.Fprintln(w, `{"timestamps":[1700000002000,1700000005000]}`)
 	}))
@@ -85,5 +88,8 @@ func TestEvaluationRange(t *testing.T) {
 	}
 	if want := time.UnixMilli(1700000005000); !finishedAt.Equal(want) {
 		t.Fatalf("finishedAt = %v, want %v", finishedAt, want)
+	}
+	if start == "" || end == "" {
+		t.Fatalf("export range is missing: start=%q end=%q", start, end)
 	}
 }
