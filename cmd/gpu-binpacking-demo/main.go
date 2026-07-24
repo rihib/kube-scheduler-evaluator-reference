@@ -82,7 +82,8 @@ func profile(schedulerName, scorePlugin string) schedulerapi.KubeSchedulerProfil
 				Enabled: []schedulerapi.Plugin{{Name: "NodeResourcesFit"}},
 			},
 			Score: schedulerapi.PluginSet{
-				Enabled: []schedulerapi.Plugin{{Name: scorePlugin, Weight: 1}},
+				Disabled: []schedulerapi.Plugin{{Name: "*"}},
+				Enabled:  []schedulerapi.Plugin{{Name: scorePlugin, Weight: 1}},
 			},
 			Bind: schedulerapi.PluginSet{
 				Enabled: []schedulerapi.Plugin{{Name: "DefaultBinder"}},

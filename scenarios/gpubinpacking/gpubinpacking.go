@@ -1,7 +1,6 @@
 package gpubinpacking
 
 import (
-	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/clusterdata"
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 )
 
@@ -13,9 +12,9 @@ const (
 )
 
 func UtilizationGenerator(ch chan<- definition.Event) {
-	clusterdata.GenerateForScheduler(ch, UtilizationScheduler, true)
+	generate(ch, UtilizationScheduler)
 }
 
 func BestFitGenerator(ch chan<- definition.Event) {
-	clusterdata.GenerateForScheduler(ch, BestFitScheduler, true)
+	generate(ch, BestFitScheduler)
 }

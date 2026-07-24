@@ -16,17 +16,17 @@ make clean # Stop and clean up
 
 ## KubeCon Japan GPU bin-packing demo
 
-The demo replays the GPU workloads from the Alibaba GPU 2023 trace twice: once
-with the current-utilization Score plugin and once with the absolute best-fit
-plugin. Both evaluations therefore process the same 1,523 nodes and 7,064
-GPU-requesting Pods from the real trace. The 1,088 Pods that request no GPU are
-excluded. The trace cluster contains 1,213 GPU nodes and 6,212 allocatable GPUs.
+The demo runs a deterministic synthetic scenario at Alibaba GPU 2023 trace
+scale: 1,523 nodes and 8,152 Pods. Every Pod requests at least one GPU; the demo
+does not download or replay the Alibaba trace. The synthetic cluster has 6,212
+allocatable GPUs across 1-, 4-, and 8-GPU nodes, plus CPU-only nodes.
 
 The baseline plugin prefers the node with the highest current GPU allocation
 percentage. The best-fit plugin instead prefers the feasible node with the
-fewest GPUs left after placing the incoming Pod. Replaying identical trace
-events makes the resulting utilization curve, average utilization, and
-completion time directly comparable.
+fewest GPUs left after placing the incoming Pod. Both plugins receive the same
+events. Short warm-up Pods are followed by long-lived 1-GPU Pods and then
+8-GPU Pods, making GPU fragmentation visible in cluster allocation and
+completion time.
 
 ```bash
 git clone --branch agent/kubecon-gpu-binpacking-demo https://github.com/rihib/kube-scheduler-evaluator.git
@@ -65,8 +65,7 @@ hardware activity would require a runtime telemetry source such as DCGM.
 For a live presentation, keep Grafana open before running `make demo`. Refresh
 the dashboard after the command prints `verified GPU allocation metrics`, then
 walk through the allocation curve, average, and completion-time panels. The demo
-uses virtual timestamps from the full trace, so the dashboard time range
-intentionally extends 160 days into the future.
+finishes within one day of virtual time, and requires no trace download.
 
 ## Scenarios
 
