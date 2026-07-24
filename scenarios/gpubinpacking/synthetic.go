@@ -22,16 +22,29 @@ const (
 	fourGPUNodeCount  = 733
 	oneGPUNodeCount   = 80
 
-	warmupPodCount  = 5356
-	blockerPodCount = 2400
-	largePodCount   = 396
+	blockerPodStart = 4348
+	blockerPodCount = 800
+	largePodStart   = blockerPodStart + blockerPodCount
+	largePodCount   = 390
 
 	nodeInterval       = time.Millisecond
-	podInterval        = 10 * time.Millisecond
-	phaseInterval      = time.Hour
-	warmupPodDuration  = 30 * time.Minute
-	blockerPodDuration = 6 * time.Hour
-	largePodDuration   = time.Hour
+	podCreationSpan    = 150 * 24 * time.Hour
+	scenarioDuration   = 160 * 24 * time.Hour
+	blockerPodDuration = 60 * 24 * time.Hour
+	largePodDuration   = 20 * 24 * time.Hour
+)
+
+var (
+	regularGPURequests  = [...]int64{1, 1, 1, 2, 2, 4, 1}
+	regularPodDurations = [...]time.Duration{
+		6 * time.Hour,
+		12 * time.Hour,
+		24 * time.Hour,
+		48 * time.Hour,
+		72 * time.Hour,
+		7 * 24 * time.Hour,
+		14 * 24 * time.Hour,
+	}
 )
 
 func generate(ch chan<- definition.Event, schedulerName string) {
@@ -43,41 +56,53 @@ func generate(ch chan<- definition.Event, schedulerName string) {
 		)
 	}
 
-	podIndex := 0
-	for range warmupPodCount {
+	previousCreation := time.Duration(0)
+	for podIndex := range PodCount {
+		workload := syntheticWorkloadAt(podIndex)
+		interval := workload.creation - previousCreation
 		ch <- newSyntheticPodEvent(
 			schedulerName,
 			podIndex,
-			1,
-			warmupPodDuration,
-			podInterval,
-		)
-		podIndex++
-	}
-	for i := range blockerPodCount {
-		interval := podInterval
-		if i == 0 {
-			interval = phaseInterval
-		}
-		ch <- newSyntheticPodEvent(
-			schedulerName,
-			podIndex,
-			1,
-			blockerPodDuration,
+			workload.gpuCount,
+			workload.duration,
 			interval,
 		)
-		podIndex++
+		previousCreation = workload.creation
 	}
-	for range largePodCount {
-		ch <- newSyntheticPodEvent(
-			schedulerName,
-			podIndex,
-			8,
-			largePodDuration,
-			podInterval,
-		)
-		podIndex++
+}
+
+type syntheticWorkload struct {
+	creation time.Duration
+	duration time.Duration
+	gpuCount int64
+}
+
+func syntheticWorkloadAt(index int) syntheticWorkload {
+	segments := time.Duration(PodCount - 1)
+	creation := time.Duration(index)*(podCreationSpan/segments) +
+		time.Duration(index)*(podCreationSpan%segments)/segments
+	workload := syntheticWorkload{
+		creation: creation,
+		duration: regularPodDurations[index%len(regularPodDurations)],
+		gpuCount: regularGPURequests[index%len(regularGPURequests)],
 	}
+	switch {
+	case index >= blockerPodStart && index < blockerPodStart+blockerPodCount:
+		workload.duration = blockerPodDuration
+		workload.gpuCount = 1
+	case index >= largePodStart && index < largePodStart+largePodCount:
+		workload.duration = largePodDuration
+		workload.gpuCount = 8
+	}
+
+	remaining := scenarioDuration - creation
+	if workload.duration > remaining {
+		workload.duration = remaining
+	}
+	if index == PodCount-1 {
+		workload.duration = remaining
+	}
+	return workload
 }
 
 func gpuCapacityForNode(index int) int64 {

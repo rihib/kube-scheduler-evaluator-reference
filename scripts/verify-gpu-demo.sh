@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 
 vm_url = sys.argv[1]
-query_time = int(time.time() + 24 * 60 * 60)
+query_time = int(time.time() + 200 * 24 * 60 * 60)
 
 def query_result(expression):
     params = urllib.parse.urlencode({"query": expression, "time": query_time})
@@ -25,7 +25,7 @@ def query_value(expression):
 
 latest = query_result(
     'topk(1, max by (evaluation_id) '
-    '(max_over_time(virtualtime_created_at_miliseconds{obj_kind="scenario"}[2d])))'
+    '(max_over_time(virtualtime_created_at_miliseconds{obj_kind="scenario"}[220d])))'
 )
 if len(latest) != 1:
     raise SystemExit("could not identify the latest evaluation")
@@ -35,12 +35,12 @@ if not evaluation_id:
 
 selector = f'evaluation_id="{evaluation_id}"'
 queries = {
-    "baseline_peak": f'max(max_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-utilization-binpack"}}[2d]))',
-    "best_fit_peak": f'max(max_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[2d]))',
-    "baseline_average": f'max(max_over_time(gpu_average_allocation_percent{{{selector},scenario_id="scenario-gpu-utilization-binpack"}}[2d]))',
-    "best_fit_average": f'max(max_over_time(gpu_average_allocation_percent{{{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[2d]))',
-    "baseline_minutes": f'(max(max_over_time(virtualtime_deleted_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-utilization-binpack"}}[2d])) - min(max_over_time(virtualtime_created_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-utilization-binpack"}}[2d]))) / 60000',
-    "best_fit_minutes": f'(max(max_over_time(virtualtime_deleted_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[2d])) - min(max_over_time(virtualtime_created_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[2d]))) / 60000',
+    "baseline_peak": f'max(max_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d]))',
+    "best_fit_peak": f'max(max_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d]))',
+    "baseline_average": f'max(max_over_time(gpu_average_allocation_percent{{{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d]))',
+    "best_fit_average": f'max(max_over_time(gpu_average_allocation_percent{{{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d]))',
+    "baseline_minutes": f'(max(max_over_time(virtualtime_deleted_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d])) - min(max_over_time(virtualtime_created_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d]))) / 60000',
+    "best_fit_minutes": f'(max(max_over_time(virtualtime_deleted_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d])) - min(max_over_time(virtualtime_created_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d]))) / 60000',
 }
 
 for _ in range(20):

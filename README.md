@@ -24,9 +24,10 @@ allocatable GPUs across 1-, 4-, and 8-GPU nodes, plus CPU-only nodes.
 The baseline plugin prefers the node with the highest current GPU allocation
 percentage. The best-fit plugin instead prefers the feasible node with the
 fewest GPUs left after placing the incoming Pod. Both plugins receive the same
-events. Short warm-up Pods are followed by long-lived 1-GPU Pods and then
-8-GPU Pods, making GPU fragmentation visible in cluster allocation and
-completion time.
+events spread across 150 days. Regular jobs run from six hours to 14 days. A
+late comparison window adds 60-day 1-GPU jobs followed by 20-day 8-GPU jobs,
+making GPU fragmentation visible without concentrating thousands of creations
+at one virtual timestamp. The planned workload spans 160 days.
 
 ```bash
 git clone --branch agent/kubecon-gpu-binpacking-demo https://github.com/rihib/kube-scheduler-evaluator.git
@@ -65,7 +66,7 @@ hardware activity would require a runtime telemetry source such as DCGM.
 For a live presentation, keep Grafana open before running `make demo`. Refresh
 the dashboard after the command prints `verified GPU allocation metrics`, then
 walk through the allocation curve, average, and completion-time panels. The demo
-finishes within one day of virtual time, and requires no trace download.
+uses approximately 160 days of virtual time and requires no trace download.
 
 ## Scenarios
 

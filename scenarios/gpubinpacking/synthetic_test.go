@@ -1,7 +1,9 @@
 package gpubinpacking
 
 import (
+	"sort"
 	"testing"
+	"time"
 
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 	appsv1 "k8s.io/api/apps/v1"
@@ -16,6 +18,9 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 
 	var nodeCount, podCount int
 	var allocatableGPU, requestedGPU int64
+	var podCreation, lastPodCreation, lastPodCompletion time.Duration
+	var longRunningPods, blockerPods, largePods int
+	var lifetimes []lifetime
 	for scenarioEvent := range events {
 		switch obj := scenarioEvent.Object().(type) {
 		case *corev1.Node:
@@ -24,6 +29,8 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 			allocatableGPU += gpus.Value()
 		case *appsv1.ReplicaSet:
 			podCount++
+			podCreation += scenarioEvent.Interval()
+			lastPodCreation = podCreation
 			pod := &corev1.Pod{Spec: obj.Spec.Template.Spec}
 			requests := resourcehelper.PodRequests(pod, resourcehelper.PodResourcesOptions{})
 			gpus := requests[corev1.ResourceName("nvidia.com/gpu")]
@@ -31,6 +38,22 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 				t.Fatalf("Pod %q does not request a GPU", obj.Name)
 			}
 			requestedGPU += gpus.Value()
+			rawDuration := obj.Spec.Template.Annotations[definition.ExecutionDurationAnnotationKey("example.com")]
+			duration, err := time.ParseDuration(rawDuration)
+			if err != nil {
+				t.Fatalf("Pod %q has invalid duration %q: %v", obj.Name, rawDuration, err)
+			}
+			if duration >= 24*time.Hour {
+				longRunningPods++
+			}
+			if duration == blockerPodDuration {
+				blockerPods++
+			}
+			if gpus.Value() == 8 && duration == largePodDuration {
+				largePods++
+			}
+			lastPodCompletion = max(lastPodCompletion, podCreation+duration)
+			lifetimes = append(lifetimes, lifetime{start: podCreation, end: podCreation + duration})
 		default:
 			t.Fatalf("unexpected scenario object type %T", obj)
 		}
@@ -48,6 +71,53 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 	if requestedGPU <= 0 {
 		t.Fatal("total requested GPUs must be positive")
 	}
+	if lastPodCreation != podCreationSpan {
+		t.Fatalf("last Pod creation = %v, want %v", lastPodCreation, podCreationSpan)
+	}
+	if lastPodCompletion != scenarioDuration {
+		t.Fatalf("last planned Pod completion = %v, want %v", lastPodCompletion, scenarioDuration)
+	}
+	if longRunningPods == 0 {
+		t.Fatal("scenario has no Pods running for at least one day")
+	}
+	if blockerPods != blockerPodCount {
+		t.Fatalf("60-day blocker Pods = %d, want %d", blockerPods, blockerPodCount)
+	}
+	if largePods != largePodCount {
+		t.Fatalf("20-day 8-GPU Pods = %d, want %d", largePods, largePodCount)
+	}
+	if active := maximumConcurrentPods(lifetimes); active > 1500 {
+		t.Fatalf("planned concurrent Pods = %d, want at most 1500", active)
+	}
+}
+
+type lifetime struct {
+	start time.Duration
+	end   time.Duration
+}
+
+func maximumConcurrentPods(lifetimes []lifetime) int {
+	type boundary struct {
+		at    time.Duration
+		delta int
+	}
+	boundaries := make([]boundary, 0, len(lifetimes)*2)
+	for _, item := range lifetimes {
+		boundaries = append(boundaries, boundary{at: item.start, delta: 1})
+		boundaries = append(boundaries, boundary{at: item.end, delta: -1})
+	}
+	sort.Slice(boundaries, func(i, j int) bool {
+		if boundaries[i].at == boundaries[j].at {
+			return boundaries[i].delta < boundaries[j].delta
+		}
+		return boundaries[i].at < boundaries[j].at
+	})
+	active, maximum := 0, 0
+	for _, item := range boundaries {
+		active += item.delta
+		maximum = max(maximum, active)
+	}
+	return maximum
 }
 
 func TestGeneratorsUseTheirSchedulerProfiles(t *testing.T) {
