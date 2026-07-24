@@ -17,7 +17,9 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 	close(events)
 
 	var createdNodeCount, deletedNodeCount, podCount int
+	var createdGPUNodeCount int
 	var allocatableGPU, requestedGPU int64
+	var requestedGPUSeconds float64
 	var podCreation, lastPodCreation, lastPodCompletion time.Duration
 	var firstNodeDeletionInterval time.Duration
 	var longRunningPods, blockerPods, largePods int
@@ -31,6 +33,9 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 				createdNodeCount++
 				gpus := obj.Status.Allocatable[corev1.ResourceName("nvidia.com/gpu")]
 				allocatableGPU += gpus.Value()
+				if gpus.Sign() > 0 {
+					createdGPUNodeCount++
+				}
 			case definition.EventTypeDelete:
 				if podCount != PodCount {
 					nodeDeletionBeforeAllPods = true
@@ -71,6 +76,7 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 				largePods++
 			}
 			lastPodCompletion = max(lastPodCompletion, podCreation+duration)
+			requestedGPUSeconds += float64(gpus.Value()) * duration.Seconds()
 			lifetimes = append(lifetimes, lifetime{start: podCreation, end: podCreation + duration})
 		default:
 			t.Fatalf("unexpected scenario object type %T", obj)
@@ -79,6 +85,9 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 
 	if createdNodeCount != NodeCount {
 		t.Fatalf("created node count = %d, want %d", createdNodeCount, NodeCount)
+	}
+	if createdGPUNodeCount != gpuNodeCount {
+		t.Fatalf("created GPU node count = %d, want %d", createdGPUNodeCount, gpuNodeCount)
 	}
 	if deletedNodeCount != NodeCount {
 		t.Fatalf("deleted node count = %d, want %d", deletedNodeCount, NodeCount)
@@ -92,8 +101,8 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 	if podCount != PodCount {
 		t.Fatalf("Pod count = %d, want %d", podCount, PodCount)
 	}
-	if allocatableGPU != 6212 {
-		t.Fatalf("allocatable GPUs = %d, want 6212", allocatableGPU)
+	if allocatableGPU != allocatableGPUs {
+		t.Fatalf("allocatable GPUs = %d, want %d", allocatableGPU, allocatableGPUs)
 	}
 	if requestedGPU <= 0 {
 		t.Fatal("total requested GPUs must be positive")
@@ -115,6 +124,10 @@ func TestSyntheticScenarioScaleAndGPURequests(t *testing.T) {
 	}
 	if active := maximumConcurrentPods(lifetimes); active > 1500 {
 		t.Fatalf("planned concurrent Pods = %d, want at most 1500", active)
+	}
+	plannedAverage := requestedGPUSeconds / scenarioDuration.Seconds() / float64(allocatableGPUs) * 100
+	if plannedAverage < 40 {
+		t.Fatalf("planned average GPU demand = %.1f%%, want at least 40%%", plannedAverage)
 	}
 }
 

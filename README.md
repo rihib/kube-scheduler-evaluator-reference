@@ -18,8 +18,9 @@ make clean # Stop and clean up
 
 The demo runs a deterministic synthetic scenario at Alibaba GPU 2023 trace
 scale: 1,523 nodes and 8,152 Pods. Every Pod requests at least one GPU; the demo
-does not download or replay the Alibaba trace. The synthetic cluster has 6,212
-allocatable GPUs across 1-, 4-, and 8-GPU nodes, plus CPU-only nodes.
+does not download or replay the Alibaba trace. The synthetic cluster has 2,400
+allocatable GPUs across 500 GPU nodes: 250 8-GPU nodes, 50 4-GPU nodes, and
+200 1-GPU nodes. The remaining 1,023 nodes are CPU-only.
 
 The baseline plugin prefers the node with the highest current GPU allocation
 percentage. The best-fit plugin instead prefers the feasible node with the

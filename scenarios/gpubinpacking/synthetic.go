@@ -18,9 +18,11 @@ const (
 	NodeCount = 1523
 	PodCount  = 8152
 
-	eightGPUNodeCount = 400
-	fourGPUNodeCount  = 733
-	oneGPUNodeCount   = 80
+	eightGPUNodeCount = 250
+	fourGPUNodeCount  = 50
+	oneGPUNodeCount   = 200
+	gpuNodeCount      = eightGPUNodeCount + fourGPUNodeCount + oneGPUNodeCount
+	allocatableGPUs   = eightGPUNodeCount*8 + fourGPUNodeCount*4 + oneGPUNodeCount
 
 	blockerPodStart = 4348
 	blockerPodCount = 800
