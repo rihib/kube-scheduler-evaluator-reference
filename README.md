@@ -29,8 +29,8 @@ events makes the resulting utilization curve, average utilization, and
 completion time directly comparable.
 
 ```bash
-git clone https://github.com/rihib/kube-scheduler-evaluator.git
-git clone https://github.com/rihib/kube-scheduler-evaluator-reference.git
+git clone --branch agent/kubecon-gpu-binpacking-demo https://github.com/rihib/kube-scheduler-evaluator.git
+git clone --branch agent/kubecon-gpu-binpacking-demo https://github.com/rihib/kube-scheduler-evaluator-reference.git
 cd kube-scheduler-evaluator-reference
 
 make demo

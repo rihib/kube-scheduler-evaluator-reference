@@ -58,7 +58,7 @@
   "tags": ["kube-scheduler-evaluator", "gpu", "bin-packing", "large-scale"],
   "templating": {
     "list": [
-      {"current": {}, "datasource": {"type": "prometheus", "uid": "victoriametrics"}, "definition": "label_values(gpu_allocation_percent, evaluation_id)", "hide": 0, "includeAll": false, "label": "Evaluation", "multi": false, "name": "evaluation", "options": [], "query": {"query": "label_values(gpu_allocation_percent, evaluation_id)", "refId": "StandardVariableQuery"}, "refresh": 2, "regex": "", "skipUrlSync": false, "sort": 2, "type": "query"}
+      {"current": {}, "datasource": {"type": "prometheus", "uid": "victoriametrics"}, "definition": "label_values(virtualtime_created_at_miliseconds{obj_kind=\"scenario\"}, evaluation_id)", "hide": 0, "includeAll": false, "label": "Evaluation", "multi": false, "name": "evaluation", "options": [], "query": {"query": "label_values(virtualtime_created_at_miliseconds{obj_kind=\"scenario\"}, evaluation_id)", "refId": "StandardVariableQuery"}, "refresh": 2, "regex": "", "skipUrlSync": false, "sort": 2, "type": "query"}
     ]
   },
   "time": {"from": "now-5m", "to": "now+160d"},

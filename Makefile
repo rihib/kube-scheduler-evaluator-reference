@@ -32,9 +32,8 @@ run: build
 demo: down up run-demo verify-demo
 
 .PHONY: build-demo
-build-demo: bin/gpu-binpacking-demo
-
-bin/gpu-binpacking-demo: $(shell find . -name '*.go')
+build-demo:
+	mkdir -p bin
 	go build -o bin/gpu-binpacking-demo ./cmd/gpu-binpacking-demo
 
 .PHONY: run-demo

@@ -34,7 +34,15 @@ for _ in range(20):
         break
     time.sleep(0.5)
 else:
-    raise SystemExit(f"GPU metrics did not become queryable: {values}")
+    if values.get("baseline_minutes") is not None and values.get("best_fit_minutes") is not None:
+        raise SystemExit(
+            "GPU metrics are missing although Pod metrics exist. "
+            "Run `make build-demo` to rebuild against "
+            "../kube-scheduler-evaluator and confirm both repositories are on "
+            "agent/kubecon-gpu-binpacking-demo. "
+            f"Values: {values}"
+        )
+    raise SystemExit(f"demo metrics did not become queryable: {values}")
 
 for name in ("baseline_peak", "best_fit_peak", "baseline_average", "best_fit_average"):
     if not 0 <= values[name] <= 100:
