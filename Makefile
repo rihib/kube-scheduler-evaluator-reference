@@ -1,5 +1,6 @@
 BASE := docker/compose.yaml
 EXT := docker/compose.ext.yaml
+EVALUATOR_DIR := ../kube-scheduler-evaluator
 
 .PHONY: all
 all: down up run
@@ -27,6 +28,33 @@ do-build:
 .PHONY: run
 run: build
 	./bin/kube-scheduler-evaluator
+
+.PHONY: demo
+demo: down up run-demo verify-demo
+
+.PHONY: build-demo
+build-demo: check-demo-dependency
+	mkdir -p bin
+	go build -o bin/gpu-binpacking-demo ./cmd/gpu-binpacking-demo
+
+.PHONY: check-demo-dependency
+check-demo-dependency:
+	@if ! test -f $(EVALUATOR_DIR)/internal/metric/point/gpuallocation.go; then \
+		echo "GPU metric support is missing from $(EVALUATOR_DIR)."; \
+		echo "Switch that checkout to agent/kubecon-gpu-binpacking-demo before running the demo:"; \
+		echo "  git -C $(EVALUATOR_DIR) fetch origin agent/kubecon-gpu-binpacking-demo"; \
+		echo "  git -C $(EVALUATOR_DIR) switch agent/kubecon-gpu-binpacking-demo"; \
+		echo "  git -C $(EVALUATOR_DIR) pull --ff-only"; \
+		exit 1; \
+	fi
+
+.PHONY: run-demo
+run-demo: build-demo
+	./bin/gpu-binpacking-demo
+
+.PHONY: verify-demo
+verify-demo:
+	bash ./scripts/verify-gpu-demo.sh
 
 .PHONY: up
 up:

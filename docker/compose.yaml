@@ -7,6 +7,7 @@ services:
     command:
       - -storageDataPath=/var/lib/victoria-metrics
       - -retentionPeriod=365d
+      - -maxFutureTime=365d
     ports:
       - "8428:8428"
     volumes:

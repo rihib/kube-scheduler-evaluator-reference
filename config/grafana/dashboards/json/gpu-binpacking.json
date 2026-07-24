@@ -1,0 +1,71 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "description": "Scheduler-visible GPU requests divided by allocatable GPUs across the whole 1,523-node cluster.",
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "stepAfter", "lineWidth": 3, "pointSize": 4, "showPoints": "auto", "spanNulls": false}, "max": 100, "min": 0, "unit": "percent"},
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": "/.*best-fit.*/"}, "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]},
+          {"matcher": {"id": "byRegexp", "options": "/.*utilization.*/"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]}
+        ]
+      },
+      "gridPos": {"h": 11, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"calcs": ["max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "victoriametrics"}, "editorMode": "code", "expr": "gpu_allocation_percent{evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}", "legendFormat": "{{scenario_id}}", "range": true, "refId": "A"}],
+      "title": "Cluster GPU allocation over virtual time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "description": "Time-weighted cluster GPU allocation from the first scheduled GPU workload through the final GPU workload completion.",
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "thresholds"}, "decimals": 1, "max": 100, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "orange", "value": null}, {"color": "green", "value": 70}]}, "unit": "percent"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 11},
+      "id": 2,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "victoriametrics"}, "editorMode": "code", "expr": "last_over_time(gpu_average_allocation_percent{evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}[$__range])", "instant": true, "legendFormat": "{{scenario_id}}", "range": false, "refId": "A"}],
+      "title": "Average GPU allocation",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "description": "Virtual time from the first Pod creation to the last Pod completion. Node cleanup events are excluded.",
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "thresholds"}, "decimals": 1, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 40}]}, "unit": "m"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 11},
+      "id": 3,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "victoriametrics"}, "editorMode": "code", "expr": "(max by (scenario_id, iteration) (max_over_time(virtualtime_deleted_at_miliseconds{obj_kind=\"pod\",evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}[$__range])) - min by (scenario_id, iteration) (max_over_time(virtualtime_created_at_miliseconds{obj_kind=\"pod\",evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}[$__range]))) / 60000", "instant": true, "legendFormat": "{{scenario_id}}", "range": false, "refId": "A"}],
+      "title": "Scenario completion time",
+      "type": "stat"
+    }
+  ],
+  "refresh": false,
+  "schemaVersion": 39,
+  "tags": ["kube-scheduler-evaluator", "gpu", "bin-packing", "large-scale"],
+  "templating": {
+    "list": [
+      {"current": {}, "datasource": {"type": "prometheus", "uid": "victoriametrics"}, "definition": "label_values(virtualtime_created_at_miliseconds{obj_kind=\"scenario\"}, evaluation_id)", "hide": 0, "includeAll": false, "label": "Evaluation", "multi": false, "name": "evaluation", "options": [], "query": {"query": "label_values(virtualtime_created_at_miliseconds{obj_kind=\"scenario\"}, evaluation_id)", "refId": "StandardVariableQuery"}, "refresh": 2, "regex": "", "skipUrlSync": false, "sort": 2, "type": "query"}
+    ]
+  },
+  "time": {"from": "now-5m", "to": "now+180d"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "GPU Bin Packing Demo — Synthetic Alibaba Scale",
+  "uid": "gpu-binpacking-demo",
+  "version": 4,
+  "weekStart": ""
+}

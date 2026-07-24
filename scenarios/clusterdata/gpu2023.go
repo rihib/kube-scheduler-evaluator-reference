@@ -23,35 +23,58 @@ import (
 const Name = "gpu2023"
 
 const (
-	schedulerName   = "default-scheduler"
-	nodeListURL     = "https://raw.githubusercontent.com/alibaba/clusterdata/refs/heads/master/cluster-trace-gpu-v2023/csv/openb_node_list_all_node.csv"
-	podListURL      = "https://raw.githubusercontent.com/alibaba/clusterdata/refs/heads/master/cluster-trace-gpu-v2023/csv/openb_pod_list_default.csv"
-	defaultInterval = time.Second
+	defaultSchedulerName = "default-scheduler"
+	nodeListURL          = "https://raw.githubusercontent.com/alibaba/clusterdata/refs/heads/master/cluster-trace-gpu-v2023/csv/openb_node_list_all_node.csv"
+	podListURL           = "https://raw.githubusercontent.com/alibaba/clusterdata/refs/heads/master/cluster-trace-gpu-v2023/csv/openb_pod_list_default.csv"
+	defaultInterval      = time.Second
+	cleanupInterval      = 180 * 24 * time.Hour
 )
 
 func Generator(ch chan<- definition.Event) {
-	if err := nodeGenerator(ch); err != nil {
+	generate(ch, defaultSchedulerName, false)
+}
+
+// GenerateForScheduler replays the Alibaba GPU 2023 trace with the requested
+// scheduler. When cleanup is true, it removes the trace nodes after every
+// workload has completed so another scheduler can replay the same trace.
+func GenerateForScheduler(ch chan<- definition.Event, schedulerName string, cleanup bool) {
+	generate(ch, schedulerName, cleanup)
+}
+
+func generate(ch chan<- definition.Event, schedulerName string, cleanup bool) {
+	nodes, err := nodeGenerator(ch)
+	if err != nil {
 		panic(err)
 	}
 	if err := podGenerator(ch, schedulerName); err != nil {
 		panic(err)
 	}
+	if cleanup {
+		for i, node := range nodes {
+			interval := defaultInterval
+			if i == 0 {
+				interval = cleanupInterval
+			}
+			ch <- definition.NewEvent(definition.EventTypeDelete, node, interval)
+		}
+	}
 }
 
 // sn,cpu_milli,memory_mib,gpu,model
 // openb-node-0229,96000,786432,8,V100M32
-func nodeGenerator(ch chan<- definition.Event) error {
+func nodeGenerator(ch chan<- definition.Event) ([]*corev1.Node, error) {
 	resp, err := http.Get(nodeListURL)
 	if err != nil {
-		return fmt.Errorf("failed to download node list: %w", err)
+		return nil, fmt.Errorf("failed to download node list: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status %s while downloading node list", resp.Status)
+		return nil, fmt.Errorf("unexpected status %s while downloading node list", resp.Status)
 	}
 	reader := csv.NewReader(resp.Body)
 	reader.FieldsPerRecord = -1
 	reader.TrimLeadingSpace = true
+	var nodes []*corev1.Node
 
 	for {
 		record, err := reader.Read()
@@ -59,10 +82,10 @@ func nodeGenerator(ch chan<- definition.Event) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("csv read error: %w", err)
+			return nil, fmt.Errorf("csv read error: %w", err)
 		}
 		if len(record) < 5 {
-			return fmt.Errorf("clusterdata: malformed record (len=%d)", len(record))
+			return nil, fmt.Errorf("clusterdata: malformed record (len=%d)", len(record))
 		}
 
 		serverName := strings.TrimSpace(record[0])
@@ -71,15 +94,15 @@ func nodeGenerator(ch chan<- definition.Event) error {
 		}
 		cpuMilli, err := parseIntField(record[1], "cpu_milli")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		memoryMiB, err := parseIntField(record[2], "memory_mib")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		gpuCount, err := parseIntField(record[3], "gpu")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		model := strings.TrimSpace(record[4])
 
@@ -90,9 +113,10 @@ func nodeGenerator(ch chan<- definition.Event) error {
 			defaultInterval,
 		)
 		ch <- event
+		nodes = append(nodes, node)
 	}
 
-	return nil
+	return nodes, nil
 }
 
 func buildNode(name string, cpuMilli, memoryMiB, gpuCount int64, model string) *corev1.Node {

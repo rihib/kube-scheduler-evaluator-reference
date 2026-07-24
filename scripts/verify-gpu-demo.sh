@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+python3 - "${VICTORIAMETRICS_URL:-http://localhost:8428}" <<'PY'
+import json
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+vm_url = sys.argv[1]
+query_time = int(time.time() + 200 * 24 * 60 * 60)
+
+def query_result(expression):
+    params = urllib.parse.urlencode({"query": expression, "time": query_time})
+    with urllib.request.urlopen(f"{vm_url}/api/v1/query?{params}") as response:
+        payload = json.load(response)
+    return payload.get("data", {}).get("result", [])
+
+def query_value(expression):
+    result = query_result(expression)
+    if len(result) != 1:
+        return None
+    return float(result[0]["value"][1])
+
+latest = query_result(
+    'topk(1, max by (evaluation_id) '
+    '(max_over_time(virtualtime_created_at_miliseconds{obj_kind="scenario"}[220d])))'
+)
+if len(latest) != 1:
+    raise SystemExit("could not identify the latest evaluation")
+evaluation_id = latest[0].get("metric", {}).get("evaluation_id")
+if not evaluation_id:
+    raise SystemExit(f"latest evaluation has no evaluation_id: {latest}")
+
+selector = f'evaluation_id="{evaluation_id}"'
+queries = {
+    "baseline_peak": f'max(max_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d]))',
+    "best_fit_peak": f'max(max_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d]))',
+    "baseline_average": f'max(max_over_time(gpu_average_allocation_percent{{{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d]))',
+    "best_fit_average": f'max(max_over_time(gpu_average_allocation_percent{{{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d]))',
+    "baseline_span_days": f'max(tlast_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d]) - tfirst_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d])) / 86400',
+    "best_fit_span_days": f'max(tlast_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d]) - tfirst_over_time(gpu_allocation_percent{{{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d])) / 86400',
+    "baseline_minutes": f'(max(max_over_time(virtualtime_deleted_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d])) - min(max_over_time(virtualtime_created_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-utilization-binpack"}}[220d]))) / 60000',
+    "best_fit_minutes": f'(max(max_over_time(virtualtime_deleted_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d])) - min(max_over_time(virtualtime_created_at_miliseconds{{obj_kind="pod",{selector},scenario_id="scenario-gpu-best-fit-binpack"}}[220d]))) / 60000',
+}
+
+for _ in range(20):
+    values = {name: query_value(expression) for name, expression in queries.items()}
+    if all(value is not None for value in values.values()):
+        break
+    time.sleep(0.5)
+else:
+    if values.get("baseline_minutes") is not None and values.get("best_fit_minutes") is not None:
+        if values.get("baseline_peak") is not None or values.get("best_fit_peak") is not None:
+            raise SystemExit(
+                "GPU metrics stop before the scenario finishes. "
+                "Recreate VictoriaMetrics with `make down up` so its "
+                "`-maxFutureTime=365d` setting accepts the 160-day virtual timeline. "
+                f"Values: {values}"
+            )
+        raise SystemExit(
+            "GPU metrics are missing although Pod metrics exist. "
+            "The binary was built without the evaluator PR's GPU metric support. "
+            "Switch ../kube-scheduler-evaluator to "
+            "agent/kubecon-gpu-binpacking-demo, then rerun `make demo`. "
+            f"Values: {values}"
+        )
+    raise SystemExit(f"demo metrics did not become queryable: {values}")
+
+for name in ("baseline_peak", "best_fit_peak", "baseline_average", "best_fit_average"):
+    if not 0 <= values[name] <= 100:
+        raise SystemExit(f"invalid GPU percentage: {values}")
+for name in ("baseline_peak", "best_fit_peak"):
+    if values[name] < 50:
+        raise SystemExit(f"GPU allocation never reaches 50%: {values}")
+for name in ("baseline_span_days", "best_fit_span_days"):
+    if values[name] < 150:
+        raise SystemExit(f"GPU allocation timeline is shorter than 150 days: {values}")
+for name in ("baseline_minutes", "best_fit_minutes"):
+    if values[name] <= 0:
+        raise SystemExit(f"invalid scenario completion time: {values}")
+print(
+    f"verified GPU allocation metrics for {evaluation_id}: "
+    f"peak={values['baseline_peak']:.2f}%→{values['best_fit_peak']:.2f}%, "
+    f"average={values['baseline_average']:.2f}%→{values['best_fit_average']:.2f}%, "
+    f"span={values['baseline_span_days']:.1f}d→{values['best_fit_span_days']:.1f}d, "
+    f"completion={values['baseline_minutes']:.1f}m→{values['best_fit_minutes']:.1f}m"
+)
+PY
