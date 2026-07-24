@@ -16,16 +16,17 @@ make clean # Stop and clean up
 
 ## KubeCon Japan GPU bin-packing demo
 
-The demo compares two Score plugins on a heterogeneous cluster with a 1-GPU
-node and an 8-GPU node. A 4-GPU seed Pod first occupies the large node. The
-baseline plugin scores the nodes by their current GPU allocation percentage,
-so it places the next 1-GPU Pod on the 50%-allocated large node. This leaves
-only three contiguous GPUs there, and a subsequent 4-GPU Pod must wait.
+The demo replays the complete Alibaba GPU 2023 trace twice: once with the
+current-utilization Score plugin and once with the absolute best-fit plugin.
+Both evaluations therefore process the same 1,523 nodes and 8,152 Pods from the
+real trace. The trace cluster contains 1,213 GPU nodes and 6,212 allocatable
+GPUs.
 
-The improved plugin uses best-fit: it prefers the feasible node with the
-fewest GPUs remaining after placement. It therefore fills the 1-GPU node and
-preserves four contiguous GPUs on the large node, allowing the final Pod to
-start immediately.
+The baseline plugin prefers the node with the highest current GPU allocation
+percentage. The best-fit plugin instead prefers the feasible node with the
+fewest GPUs left after placing the incoming Pod. Replaying identical trace
+events makes the resulting utilization curve, average utilization, and
+completion time directly comparable.
 
 ```bash
 git clone https://github.com/rihib/kube-scheduler-evaluator.git
@@ -38,10 +39,11 @@ make open
 
 Open the **Kube Scheduler Evaluator / GPU Bin Packing Demo** dashboard. Select
 the newest `evaluation_id` if metrics from earlier runs remain in the persistent
-VictoriaMetrics volume. The expected peak cluster GPU allocation is 55.56% for
-`scenario-gpu-utilization-binpack` and 100% for
-`scenario-gpu-best-fit-binpack`; `make demo` verifies this automatically before
-returning.
+VictoriaMetrics volume. The dashboard shows the cluster GPU allocation curve,
+the time-weighted average allocation, and the workload completion time for
+`scenario-gpu-utilization-binpack` and `scenario-gpu-best-fit-binpack`.
+`make demo` verifies that all three metrics are available for both replays
+before returning.
 
 The dashboard calls this *GPU allocation*, not physical GPU utilization. The
 evaluator observes scheduler-visible Pod requests and node allocatable capacity;
@@ -49,9 +51,9 @@ hardware activity would require a runtime telemetry source such as DCGM.
 
 For a live presentation, keep Grafana open before running `make demo`. Refresh
 the dashboard after the command prints `verified GPU allocation metrics`, then
-walk through the cluster allocation panel and the per-node free-GPU panel. The
-demo uses virtual timestamps, so the dashboard time range intentionally extends
-60 minutes into the future.
+walk through the allocation curve, average, and completion-time panels. The demo
+uses virtual timestamps from the full trace, so the dashboard time range
+intentionally extends 160 days into the future.
 
 ## Scenarios
 

@@ -9,12 +9,14 @@ import urllib.parse
 import urllib.request
 
 vm_url = sys.argv[1]
-query_time = int(time.time() + 3 * 60 * 60)
+query_time = int(time.time() + 200 * 24 * 60 * 60)
 queries = {
-    "baseline": 'max(max_over_time(gpu_allocation_percent{scope="cluster",scenario_id="scenario-gpu-utilization-binpack"}[4h]))',
-    "best_fit": 'max(max_over_time(gpu_allocation_percent{scope="cluster",scenario_id="scenario-gpu-best-fit-binpack"}[4h]))',
-    "baseline_small": 'max(max_over_time(gpu_allocated_gpus{scope="node",node="gpu-small",scenario_id="scenario-gpu-utilization-binpack"}[4h]))',
-    "best_fit_small": 'max(max_over_time(gpu_allocated_gpus{scope="node",node="gpu-small",scenario_id="scenario-gpu-best-fit-binpack"}[4h]))',
+    "baseline_peak": 'max(max_over_time(gpu_allocation_percent{scenario_id="scenario-gpu-utilization-binpack"}[220d]))',
+    "best_fit_peak": 'max(max_over_time(gpu_allocation_percent{scenario_id="scenario-gpu-best-fit-binpack"}[220d]))',
+    "baseline_average": 'max(max_over_time(gpu_average_allocation_percent{scenario_id="scenario-gpu-utilization-binpack"}[220d]))',
+    "best_fit_average": 'max(max_over_time(gpu_average_allocation_percent{scenario_id="scenario-gpu-best-fit-binpack"}[220d]))',
+    "baseline_minutes": '(max(max_over_time(virtualtime_deleted_at_miliseconds{obj_kind="pod",scenario_id="scenario-gpu-utilization-binpack"}[220d])) - min(max_over_time(virtualtime_created_at_miliseconds{obj_kind="pod",scenario_id="scenario-gpu-utilization-binpack"}[220d]))) / 60000',
+    "best_fit_minutes": '(max(max_over_time(virtualtime_deleted_at_miliseconds{obj_kind="pod",scenario_id="scenario-gpu-best-fit-binpack"}[220d])) - min(max_over_time(virtualtime_created_at_miliseconds{obj_kind="pod",scenario_id="scenario-gpu-best-fit-binpack"}[220d]))) / 60000',
 }
 
 def query(expression):
@@ -34,13 +36,16 @@ for _ in range(20):
 else:
     raise SystemExit(f"GPU metrics did not become queryable: {values}")
 
-baseline = values["baseline"]
-best_fit = values["best_fit"]
-if baseline >= best_fit:
-    raise SystemExit(f"expected best-fit to improve peak allocation: baseline={baseline}, best-fit={best_fit}")
-if best_fit != 100:
-    raise SystemExit(f"expected best-fit peak allocation to be 100%, got {best_fit}")
-if values["baseline_small"] != 0 or values["best_fit_small"] != 1:
-    raise SystemExit(f"unexpected 1-GPU placement: {values}")
-print(f"verified GPU allocation metrics: baseline={baseline:.2f}%, best-fit={best_fit:.2f}%")
+for name in ("baseline_peak", "best_fit_peak", "baseline_average", "best_fit_average"):
+    if not 0 <= values[name] <= 100:
+        raise SystemExit(f"invalid GPU percentage: {values}")
+for name in ("baseline_minutes", "best_fit_minutes"):
+    if values[name] <= 0:
+        raise SystemExit(f"invalid scenario completion time: {values}")
+print(
+    "verified GPU allocation metrics: "
+    f"peak={values['baseline_peak']:.2f}%→{values['best_fit_peak']:.2f}%, "
+    f"average={values['baseline_average']:.2f}%→{values['best_fit_average']:.2f}%, "
+    f"completion={values['baseline_minutes']:.1f}m→{values['best_fit_minutes']:.1f}m"
+)
 PY
