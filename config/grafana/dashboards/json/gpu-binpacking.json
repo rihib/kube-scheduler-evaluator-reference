@@ -52,6 +52,23 @@
       "targets": [{"datasource": {"type": "prometheus", "uid": "victoriametrics"}, "editorMode": "code", "expr": "last_over_time(gpu_free_gpus{scope=\"node\",evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}[1h])", "legendFormat": "{{scenario_id}} / {{node}}", "range": true, "refId": "A"}],
       "title": "Free GPUs by node",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+      "description": "Elapsed virtual time from the first Pod creation to the last Pod completion. Scenario cleanup events such as Node deletion are excluded.",
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "decimals": 1, "min": 0, "unit": "m"},
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": "/.*best-fit.*/"}, "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]},
+          {"matcher": {"id": "byRegexp", "options": "/.*utilization.*/"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]}
+        ]
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+      "id": 5,
+      "options": {"displayMode": "gradient", "minVizHeight": 16, "minVizWidth": 8, "namePlacement": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": true, "sizing": "auto", "valueMode": "color"},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "victoriametrics"}, "editorMode": "code", "expr": "(max by (scenario_id, iteration) (max_over_time(virtualtime_deleted_at_miliseconds{obj_kind=\"pod\",evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}[$__range])) - min by (scenario_id, iteration) (max_over_time(virtualtime_created_at_miliseconds{obj_kind=\"pod\",evaluation_id=~\"$evaluation\",scenario_id=~\"scenario-gpu-.*-binpack\"}[$__range]))) / 60000", "instant": true, "legendFormat": "{{scenario_id}}", "range": false, "refId": "A"}],
+      "title": "Workload Makespan (virtual time)",
+      "type": "bargauge"
     }
   ],
   "refresh": false,
@@ -67,6 +84,6 @@
   "timezone": "browser",
   "title": "GPU Bin Packing Demo",
   "uid": "gpu-binpacking-demo",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
