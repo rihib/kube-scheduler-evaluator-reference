@@ -27,42 +27,67 @@ const (
 	nodeListURL     = "https://raw.githubusercontent.com/alibaba/clusterdata/refs/heads/master/cluster-trace-gpu-v2023/csv/openb_node_list_all_node.csv"
 	podListURL      = "https://raw.githubusercontent.com/alibaba/clusterdata/refs/heads/master/cluster-trace-gpu-v2023/csv/openb_pod_list_default.csv"
 	defaultInterval = time.Second
+
+	// nodeDeletionDelay is the interval between the last pod creation and the node deletions.
+	// It must be long enough for every pod to finish, because the nodes are deleted
+	// so that the next iteration or scenario starts from an empty cluster.
+	// If a pod is still running or pending when the nodes are deleted,
+	// the pending pods cannot be scheduled and the evaluator fails at the finish event.
+	nodeDeletionDelay = 100 * 365 * 24 * time.Hour
 )
 
 func Generator(ch chan<- definition.Event) {
-	if err := nodeGenerator(ch); err != nil {
+	nodes, err := nodeGenerator(ch)
+	if err != nil {
 		panic(err)
 	}
 	if err := podGenerator(ch, schedulerName); err != nil {
 		panic(err)
 	}
+	nodeDeleter(ch, nodes)
+}
+
+// nodeDeleter deletes all nodes after all pods have finished.
+func nodeDeleter(ch chan<- definition.Event, nodes []*corev1.Node) {
+	for i, node := range nodes {
+		interval := time.Duration(0)
+		if i == 0 {
+			interval = nodeDeletionDelay
+		}
+		ch <- definition.NewEvent(
+			definition.EventTypeDelete,
+			node,
+			interval,
+		)
+	}
 }
 
 // sn,cpu_milli,memory_mib,gpu,model
 // openb-node-0229,96000,786432,8,V100M32
-func nodeGenerator(ch chan<- definition.Event) error {
+func nodeGenerator(ch chan<- definition.Event) ([]*corev1.Node, error) {
 	resp, err := http.Get(nodeListURL)
 	if err != nil {
-		return fmt.Errorf("failed to download node list: %w", err)
+		return nil, fmt.Errorf("failed to download node list: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status %s while downloading node list", resp.Status)
+		return nil, fmt.Errorf("unexpected status %s while downloading node list", resp.Status)
 	}
 	reader := csv.NewReader(resp.Body)
 	reader.FieldsPerRecord = -1
 	reader.TrimLeadingSpace = true
 
+	var nodes []*corev1.Node
 	for {
 		record, err := reader.Read()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("csv read error: %w", err)
+			return nil, fmt.Errorf("csv read error: %w", err)
 		}
 		if len(record) < 5 {
-			return fmt.Errorf("clusterdata: malformed record (len=%d)", len(record))
+			return nil, fmt.Errorf("clusterdata: malformed record (len=%d)", len(record))
 		}
 
 		serverName := strings.TrimSpace(record[0])
@@ -71,15 +96,15 @@ func nodeGenerator(ch chan<- definition.Event) error {
 		}
 		cpuMilli, err := parseIntField(record[1], "cpu_milli")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		memoryMiB, err := parseIntField(record[2], "memory_mib")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		gpuCount, err := parseIntField(record[3], "gpu")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		model := strings.TrimSpace(record[4])
 
@@ -90,9 +115,10 @@ func nodeGenerator(ch chan<- definition.Event) error {
 			defaultInterval,
 		)
 		ch <- event
+		nodes = append(nodes, node)
 	}
 
-	return nil
+	return nodes, nil
 }
 
 func buildNode(name string, cpuMilli, memoryMiB, gpuCount int64, model string) *corev1.Node {
