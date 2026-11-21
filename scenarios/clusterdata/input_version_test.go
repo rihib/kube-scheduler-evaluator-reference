@@ -377,3 +377,16 @@ func TestBuildInputVersion_RhoBeforeAndAfterScaling(t *testing.T) {
 		t.Errorf("RhoAfterScaling = %v, want 1.1", summary.RhoAfterScaling)
 	}
 }
+
+// deletion_time が scheduled_time より前という、実行時間が負になる壊れた
+// 行があればエラーで返す。
+func TestBuildInputVersion_ErrorsOnNegativeExecutionDuration(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,10,20\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a negative execution duration")
+	}
+}
