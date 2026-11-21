@@ -1,6 +1,8 @@
 package clusterdata
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -158,5 +160,64 @@ func TestBuildInputVersion_ExecutionDurationIsDeletionMinusScheduled(t *testing.
 	want := (90 * time.Second).String()
 	if got != want {
 		t.Errorf("execution duration annotation = %q, want %q", got, want)
+	}
+}
+
+// gpu_spec が空でない Pod には、GPU の型のラベルが指定された型のどれかに
+// 一致するノードにだけ置けるよう nodeAffinity を付ける。
+func TestBuildInputVersion_AddsNodeAffinityFromGPUSpec(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,1,1000,V100M16|V100M32,LS,Running,0,100,10\n")
+
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	job := jobCreateByName(events, "openb-pod-0000")
+	if job == nil {
+		t.Fatalf("no create event for openb-pod-0000")
+	}
+	affinity := job.Spec.Template.Spec.Affinity
+	if affinity == nil || affinity.NodeAffinity == nil ||
+		affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		t.Fatalf("no nodeAffinity set, got %+v", affinity)
+	}
+	terms := affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) != 1 || len(terms[0].MatchExpressions) != 1 {
+		t.Fatalf("unexpected nodeSelectorTerms: %+v", terms)
+	}
+	expr := terms[0].MatchExpressions[0]
+	wantKey := fmt.Sprintf("%s/model", consts.UserID)
+	if expr.Key != wantKey {
+		t.Errorf("matchExpression key = %q, want %q", expr.Key, wantKey)
+	}
+	if expr.Operator != corev1.NodeSelectorOpIn {
+		t.Errorf("matchExpression operator = %q, want In", expr.Operator)
+	}
+	wantValues := []string{"V100M16", "V100M32"}
+	if !slices.Equal(expr.Values, wantValues) {
+		t.Errorf("matchExpression values = %v, want %v", expr.Values, wantValues)
+	}
+}
+
+// gpu_spec が空の Pod には nodeAffinity を付けない。
+func TestBuildInputVersion_NoNodeAffinityWithoutGPUSpec(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n")
+
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	job := jobCreateByName(events, "openb-pod-0000")
+	if job == nil {
+		t.Fatalf("no create event for openb-pod-0000")
+	}
+	if job.Spec.Template.Spec.Affinity != nil {
+		t.Errorf("affinity = %+v, want nil", job.Spec.Template.Spec.Affinity)
 	}
 }
