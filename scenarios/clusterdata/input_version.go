@@ -40,6 +40,13 @@ func BuildInputVersion(
 	seed int64,
 	targetRho, sampleRatio float64,
 ) ([]definition.Event, InputVersionSummary, error) {
+	if sampleRatio < 0 || sampleRatio > 1 {
+		return nil, InputVersionSummary{}, fmt.Errorf("clusterdata: sampleRatio must be between 0 and 1, got %v", sampleRatio)
+	}
+	if targetRho <= 0 {
+		return nil, InputVersionSummary{}, fmt.Errorf("clusterdata: targetRho must be positive, got %v", targetRho)
+	}
+
 	nodes, nodeEvents, err := parseInputVersionNodes(nodesCSV)
 	if err != nil {
 		return nil, InputVersionSummary{}, err
@@ -73,10 +80,7 @@ func BuildInputVersion(
 	periodBeforeScaling := submissionPeriodSeconds(used)
 	rhoBeforeScaling := rho(demand, capacity, periodBeforeScaling)
 
-	multiplier := 1.0
-	if targetRho > 0 {
-		multiplier = rhoBeforeScaling / targetRho
-	}
+	multiplier := rhoBeforeScaling / targetRho
 
 	events := make([]definition.Event, 0, len(nodeEvents)+len(used)+len(nodes))
 	events = append(events, nodeEvents...)
@@ -193,14 +197,18 @@ func rho(demand, capacity resourceTotals, periodSeconds float64) float64 {
 }
 
 // buildInputVersionPodEvents builds the pod Create events in submission
-// order, scaling the interval to the next pod's creation_time by
-// multiplier so that the resulting rho matches targetRho.
+// order. evaluator adds an event's interval to the clock before that event
+// fires (internal/scenario/manager.go: nextRelativeTime += d.Interval()), so
+// an event's interval is its own wait, not the wait until the next one. The
+// first pod therefore gets interval 0, and every later pod gets the gap to
+// its predecessor's creation_time, scaled by multiplier so the resulting
+// rho matches targetRho.
 func buildInputVersionPodEvents(pods []openbPodRecord, multiplier float64) []definition.Event {
 	events := make([]definition.Event, 0, len(pods))
 	for i, p := range pods {
-		interval := defaultInterval
-		if i+1 < len(pods) {
-			gapSeconds := float64(pods[i+1].creationTime - p.creationTime)
+		interval := time.Duration(0)
+		if i > 0 {
+			gapSeconds := float64(p.creationTime - pods[i-1].creationTime)
 			interval = time.Duration(gapSeconds * multiplier * float64(time.Second))
 		}
 		events = append(events, definition.NewEvent(definition.EventTypeCreate, buildInputVersionJob(p), interval))
@@ -364,6 +372,15 @@ func inputVersionNodeDeleteEvents(nodes []*corev1.Node) []definition.Event {
 	return events
 }
 
+// gpuMilliPerGPU is the gpu-milli annotation evaluator expects per
+// requested GPU. evaluator prefers this annotation over its own default
+// (also 1000 milli per GPU, see requestedResources in
+// internal/scenario/manager.go) when computing how much GPU a pod
+// requested, so passing the default explicitly keeps the recorded GPU
+// utilization correct without depending on the CSV's unused gpu_milli
+// field (BuildInputVersion uses num_gpu for the GPU request, not gpu_milli).
+const gpuMilliPerGPU = 1000
+
 func buildInputVersionJob(p openbPodRecord) *appsv1.ReplicaSet {
 	job := buildJob(
 		"default-scheduler",
@@ -371,7 +388,7 @@ func buildInputVersionJob(p openbPodRecord) *appsv1.ReplicaSet {
 		p.cpuMilli,
 		p.memoryMiB,
 		p.gpuCount,
-		0,
+		gpuMilliPerGPU,
 		p.gpuSpec,
 		p.qos,
 		time.Duration(p.deletionTime-p.scheduledTime)*time.Second,
