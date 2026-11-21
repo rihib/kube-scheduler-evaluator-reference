@@ -117,6 +117,15 @@ func sampleAndOrderPods(eligible []openbPodRecord, sampleRatio float64, rng *ran
 	return used
 }
 
+// parseOptionalIntField parses field like parseIntField, except an empty
+// value parses as 0 instead of failing.
+func parseOptionalIntField(raw, field string) (int64, error) {
+	if strings.TrimSpace(raw) == "" {
+		return 0, nil
+	}
+	return parseIntField(raw, field)
+}
+
 // resourceTotals holds a quantity (a demand or a capacity) for each of the
 // three resources rho is computed over.
 type resourceTotals struct {
@@ -263,7 +272,10 @@ func parseInputVersionPods(podsCSV io.Reader) ([]openbPodRecord, error) {
 		if err != nil {
 			return nil, err
 		}
-		scheduledTime, err := parseIntField(record[10], "scheduled_time")
+		// scheduled_time is empty for Pending pods in the openb trace (they
+		// were never scheduled). BuildInputVersion excludes Pending pods, so
+		// this value is unused for them; parse it as 0 instead of failing.
+		scheduledTime, err := parseOptionalIntField(record[10], "scheduled_time")
 		if err != nil {
 			return nil, err
 		}
