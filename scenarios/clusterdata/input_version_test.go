@@ -309,3 +309,36 @@ func TestBuildInputVersion_ShufflesOrderOfSameCreationTime(t *testing.T) {
 		t.Errorf("different seeds (1, 2) produced the same order: %v", namesSeed1a)
 	}
 }
+
+// Pod は creation_time の間隔で投入される。この CSV の ρ はちょうど
+// 0.9375（0.9375は 1000*1000*3 / (32000*100) の cpu の ρ）になるので、
+// targetRho に同じ値を渡せば倍率が1になり、間隔はそのまま creation_time
+// の差になる。
+func TestBuildInputVersion_SubmissionIntervalIsCreationTimeGap(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n"+
+			"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n"+
+			"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n")
+
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.9375, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	var intervals []time.Duration
+	for _, e := range events {
+		if _, ok := e.Object().(*appsv1.ReplicaSet); ok && e.EventType() == definition.EventTypeCreate {
+			intervals = append(intervals, e.Interval())
+		}
+	}
+	if len(intervals) != 3 {
+		t.Fatalf("got %d pod create events, want 3", len(intervals))
+	}
+	if intervals[0] != 30*time.Second {
+		t.Errorf("intervals[0] = %v, want 30s", intervals[0])
+	}
+	if intervals[1] != 70*time.Second {
+		t.Errorf("intervals[1] = %v, want 70s", intervals[1])
+	}
+}
