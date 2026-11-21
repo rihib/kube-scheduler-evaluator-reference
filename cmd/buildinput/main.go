@@ -6,42 +6,57 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/clusterdata"
 )
 
 func main() {
-	nodesPath := flag.String("nodes", ".cache/clusterdata/openb_node_list_all_node.csv", "openb node list CSV")
-	podsPath := flag.String("pods", ".cache/clusterdata/openb_pod_list_default.csv", "openb pod list CSV")
-	seed := flag.Int64("seed", 1, "seed for sampling and ordering pods")
-	targetRho := flag.Float64("rho", 1.0, "target rho the submission intervals are scaled to reach")
-	sampleRatio := flag.Float64("ratio", 0.8, "fraction of non-Pending pods to keep")
-	flag.Parse()
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run parses args in the same shape as the real command line, builds the
+// input version, and writes its summary to stdout (or an error to stderr).
+// It returns the process exit code. It is a thin adapter: all the judgment
+// about what an input version is lives in clusterdata.BuildInputVersion.
+func run(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("buildinput", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	nodesPath := fs.String("nodes", ".cache/clusterdata/openb_node_list_all_node.csv", "openb node list CSV")
+	podsPath := fs.String("pods", ".cache/clusterdata/openb_pod_list_default.csv", "openb pod list CSV")
+	seed := fs.Int64("seed", 1, "seed for sampling and ordering pods")
+	targetRho := fs.Float64("rho", 1.0, "target rho the submission intervals are scaled to reach")
+	sampleRatio := fs.Float64("ratio", 0.8, "fraction of non-Pending pods to keep")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
 
 	nodesFile, err := os.Open(*nodesPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "buildinput: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "buildinput: %v\n", err)
+		return 1
 	}
 	defer nodesFile.Close()
 
 	podsFile, err := os.Open(*podsPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "buildinput: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "buildinput: %v\n", err)
+		return 1
 	}
 	defer podsFile.Close()
 
 	_, summary, err := clusterdata.BuildInputVersion(nodesFile, podsFile, *seed, *targetRho, *sampleRatio)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "buildinput: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "buildinput: %v\n", err)
+		return 1
 	}
 
-	fmt.Printf("used pods:     %d\n", summary.UsedPodCount)
-	fmt.Printf("excluded pods: %d\n", summary.ExcludedPodCount)
-	fmt.Printf("failed pods:   %d\n", summary.FailedPodCount)
-	fmt.Printf("rho (before):  %v\n", summary.RhoBeforeScaling)
-	fmt.Printf("rho (after):   %v\n", summary.RhoAfterScaling)
+	fmt.Fprintf(stdout, "used pods:     %d\n", summary.UsedPodCount)
+	fmt.Fprintf(stdout, "excluded pods: %d\n", summary.ExcludedPodCount)
+	fmt.Fprintf(stdout, "failed pods:   %d\n", summary.FailedPodCount)
+	fmt.Fprintf(stdout, "rho (before):  %.6f\n", summary.RhoBeforeScaling)
+	fmt.Fprintf(stdout, "rho (after):   %.6f\n", summary.RhoAfterScaling)
+	return 0
 }
