@@ -1,8 +1,6 @@
 package clusterdata
 
 import (
-	"encoding/csv"
-	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -47,7 +45,7 @@ func BuildInputVersion(
 		return nil, InputVersionSummary{}, fmt.Errorf("clusterdata: targetRho must be positive, got %v", targetRho)
 	}
 
-	nodes, nodeEvents, err := parseInputVersionNodes(nodesCSV)
+	nodes, nodeEvents, err := parseNodeRecords(nodesCSV)
 	if err != nil {
 		return nil, InputVersionSummary{}, err
 	}
@@ -125,15 +123,6 @@ func sampleAndOrderPods(eligible []openbPodRecord, sampleRatio float64, rng *ran
 	})
 
 	return used
-}
-
-// parseOptionalIntField parses field like parseIntField, except an empty
-// value parses as 0 instead of failing.
-func parseOptionalIntField(raw, field string) (int64, error) {
-	if strings.TrimSpace(raw) == "" {
-		return 0, nil
-	}
-	return parseIntField(raw, field)
 }
 
 // resourceTotals holds a quantity (a demand or a capacity) for each of the
@@ -229,155 +218,6 @@ func buildInputVersionPodEvents(pods []openbPodRecord, multiplier float64) []def
 		events = append(events, definition.NewEvent(definition.EventTypeCreate, buildInputVersionJob(p), interval))
 	}
 	return events
-}
-
-// openbPodRecord is one row of the openb pod CSV, parsed into typed fields.
-type openbPodRecord struct {
-	name          string
-	cpuMilli      int64
-	memoryMiB     int64
-	gpuCount      int64
-	gpuSpec       string
-	qos           string
-	phase         string
-	creationTime  int64
-	deletionTime  int64
-	scheduledTime int64
-}
-
-// name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time
-func parseInputVersionPods(podsCSV io.Reader) ([]openbPodRecord, error) {
-	reader := csv.NewReader(podsCSV)
-	reader.FieldsPerRecord = -1
-	reader.TrimLeadingSpace = true
-
-	var records []openbPodRecord
-	for {
-		record, err := reader.Read()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("clusterdata: pod csv read error: %w", err)
-		}
-		if len(record) < 11 {
-			return nil, fmt.Errorf("clusterdata: malformed pod record (len=%d)", len(record))
-		}
-
-		name := strings.TrimSpace(record[0])
-		if strings.EqualFold(name, "name") {
-			continue
-		}
-		if name == "" {
-			return nil, fmt.Errorf("clusterdata: pod record with empty name")
-		}
-
-		cpuMilli, err := parseIntField(record[1], "cpu_milli")
-		if err != nil {
-			return nil, err
-		}
-		memoryMiB, err := parseIntField(record[2], "memory_mib")
-		if err != nil {
-			return nil, err
-		}
-		gpuCount, err := parseIntField(record[3], "num_gpu")
-		if err != nil {
-			return nil, err
-		}
-		gpuSpec := strings.TrimSpace(record[5])
-		qos := strings.TrimSpace(record[6])
-		phase := strings.TrimSpace(record[7])
-		creationTime, err := parseIntField(record[8], "creation_time")
-		if err != nil {
-			return nil, err
-		}
-		deletionTime, err := parseIntField(record[9], "deletion_time")
-		if err != nil {
-			return nil, err
-		}
-		// scheduled_time is empty for Pending pods in the openb trace (they
-		// were never scheduled). BuildInputVersion excludes Pending pods, so
-		// this value is unused for them; parse it as 0 instead of failing.
-		// Any other phase with an empty scheduled_time is unexpected data,
-		// so it is still treated as an error.
-		var scheduledTime int64
-		if strings.EqualFold(phase, "Pending") {
-			scheduledTime, err = parseOptionalIntField(record[10], "scheduled_time")
-		} else {
-			scheduledTime, err = parseIntField(record[10], "scheduled_time")
-		}
-		if err != nil {
-			return nil, err
-		}
-		if deletionTime < scheduledTime {
-			return nil, fmt.Errorf("clusterdata: negative execution duration for %s", name)
-		}
-
-		records = append(records, openbPodRecord{
-			name:          name,
-			cpuMilli:      cpuMilli,
-			memoryMiB:     memoryMiB,
-			gpuCount:      gpuCount,
-			gpuSpec:       gpuSpec,
-			qos:           qos,
-			phase:         phase,
-			creationTime:  creationTime,
-			deletionTime:  deletionTime,
-			scheduledTime: scheduledTime,
-		})
-	}
-
-	return records, nil
-}
-
-// parseInputVersionNodes reads the openb node CSV and builds the Create
-// events for every node, since an input version uses all of them.
-func parseInputVersionNodes(nodesCSV io.Reader) ([]*corev1.Node, []definition.Event, error) {
-	reader := csv.NewReader(nodesCSV)
-	reader.FieldsPerRecord = -1
-	reader.TrimLeadingSpace = true
-
-	var (
-		nodes  []*corev1.Node
-		events []definition.Event
-	)
-	for {
-		record, err := reader.Read()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("clusterdata: node csv read error: %w", err)
-		}
-		if len(record) < 5 {
-			return nil, nil, fmt.Errorf("clusterdata: malformed node record (len=%d)", len(record))
-		}
-
-		serverName := strings.TrimSpace(record[0])
-		if strings.EqualFold(serverName, "sn") {
-			continue
-		}
-
-		cpuMilli, err := parseIntField(record[1], "cpu_milli")
-		if err != nil {
-			return nil, nil, err
-		}
-		memoryMiB, err := parseIntField(record[2], "memory_mib")
-		if err != nil {
-			return nil, nil, err
-		}
-		gpuCount, err := parseIntField(record[3], "gpu")
-		if err != nil {
-			return nil, nil, err
-		}
-		model := strings.TrimSpace(record[4])
-
-		node := buildNode(serverName, cpuMilli, memoryMiB, gpuCount, model)
-		nodes = append(nodes, node)
-		events = append(events, definition.NewEvent(definition.EventTypeCreate, node, defaultInterval))
-	}
-
-	return nodes, events, nil
 }
 
 // inputVersionNodeDeleteEvents deletes all nodes after all pods have

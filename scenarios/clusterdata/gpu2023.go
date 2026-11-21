@@ -73,49 +73,13 @@ func nodeGenerator(ch chan<- definition.Event) ([]*corev1.Node, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status %s while downloading node list", resp.Status)
 	}
-	reader := csv.NewReader(resp.Body)
-	reader.FieldsPerRecord = -1
-	reader.TrimLeadingSpace = true
 
-	var nodes []*corev1.Node
-	for {
-		record, err := reader.Read()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("csv read error: %w", err)
-		}
-		if len(record) < 5 {
-			return nil, fmt.Errorf("clusterdata: malformed record (len=%d)", len(record))
-		}
-
-		serverName := strings.TrimSpace(record[0])
-		if strings.EqualFold(serverName, "sn") {
-			continue
-		}
-		cpuMilli, err := parseIntField(record[1], "cpu_milli")
-		if err != nil {
-			return nil, err
-		}
-		memoryMiB, err := parseIntField(record[2], "memory_mib")
-		if err != nil {
-			return nil, err
-		}
-		gpuCount, err := parseIntField(record[3], "gpu")
-		if err != nil {
-			return nil, err
-		}
-		model := strings.TrimSpace(record[4])
-
-		node := buildNode(serverName, cpuMilli, memoryMiB, gpuCount, model)
-		event := definition.NewEvent(
-			definition.EventTypeCreate,
-			node,
-			defaultInterval,
-		)
+	nodes, events, err := parseNodeRecords(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	for _, event := range events {
 		ch <- event
-		nodes = append(nodes, node)
 	}
 
 	return nodes, nil
