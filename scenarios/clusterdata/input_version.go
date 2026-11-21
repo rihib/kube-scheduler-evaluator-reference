@@ -87,9 +87,10 @@ func BuildInputVersion(
 }
 
 // sampleAndOrderPods draws sampleRatio of eligible using rng, then orders
-// the result by creation_time, shuffling the submission order of pods that
-// share the same creation_time (also using rng, so the same seed always
-// produces the same sample and the same order).
+// the result by creation_time. rng.Perm puts the drawn pods in a random
+// order first, and the stable sort by creation_time keeps that random
+// order among pods that share the same creation_time, which is how their
+// submission order gets shuffled.
 func sampleAndOrderPods(eligible []openbPodRecord, sampleRatio float64, rng *rand.Rand) []openbPodRecord {
 	perm := rng.Perm(len(eligible))
 	usedCount := int(float64(len(eligible))*sampleRatio + 0.5)
@@ -102,17 +103,6 @@ func sampleAndOrderPods(eligible []openbPodRecord, sampleRatio float64, rng *ran
 	sort.SliceStable(used, func(i, j int) bool {
 		return used[i].creationTime < used[j].creationTime
 	})
-
-	for start := 0; start < len(used); {
-		end := start + 1
-		for end < len(used) && used[end].creationTime == used[start].creationTime {
-			end++
-		}
-		rng.Shuffle(end-start, func(i, j int) {
-			used[start+i], used[start+j] = used[start+j], used[start+i]
-		})
-		start = end
-	}
 
 	return used
 }

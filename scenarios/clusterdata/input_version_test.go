@@ -268,3 +268,44 @@ func TestBuildInputVersion_SameSeedProducesSameSample(t *testing.T) {
 		t.Errorf("same seed produced different samples: %v vs %v", names1, names2)
 	}
 }
+
+func sixPodsAtTheSameCreationTimeCSV() *strings.Reader {
+	var b strings.Builder
+	b.WriteString(podsCSVHeader)
+	for i := 0; i < 6; i++ {
+		fmt.Fprintf(&b, "openb-pod-%04d,1000,1024,0,0,,LS,Running,0,100,10\n", i)
+	}
+	return strings.NewReader(b.String())
+}
+
+// 同じ creation_time の Pod は、間隔0で同じ時刻に投入されるが、シードで
+// 投入の順が並べ替えられる。
+func TestBuildInputVersion_ShufflesOrderOfSameCreationTime(t *testing.T) {
+	nodesCSV1 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	nodesCSV2 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	nodesCSV3 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+
+	eventsSeed1a, _, err := BuildInputVersion(nodesCSV1, sixPodsAtTheSameCreationTimeCSV(), 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+	eventsSeed1b, _, err := BuildInputVersion(nodesCSV3, sixPodsAtTheSameCreationTimeCSV(), 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+	eventsSeed2, _, err := BuildInputVersion(nodesCSV2, sixPodsAtTheSameCreationTimeCSV(), 2, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	namesSeed1a := jobCreateNames(eventsSeed1a)
+	namesSeed1b := jobCreateNames(eventsSeed1b)
+	namesSeed2 := jobCreateNames(eventsSeed2)
+
+	if !slices.Equal(namesSeed1a, namesSeed1b) {
+		t.Errorf("same seed produced different orders: %v vs %v", namesSeed1a, namesSeed1b)
+	}
+	if slices.Equal(namesSeed1a, namesSeed2) {
+		t.Errorf("different seeds (1, 2) produced the same order: %v", namesSeed1a)
+	}
+}
