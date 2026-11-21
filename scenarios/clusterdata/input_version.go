@@ -47,10 +47,16 @@ func BuildInputVersion(
 		return nil, InputVersionSummary{}, err
 	}
 
-	var eligible []openbPodRecord
+	var (
+		eligible    []openbPodRecord
+		failedCount int
+	)
 	for _, p := range allPods {
 		if strings.EqualFold(p.phase, "Pending") {
 			continue
+		}
+		if strings.EqualFold(p.phase, "Failed") {
+			failedCount++
 		}
 		eligible = append(eligible, p)
 	}
@@ -67,6 +73,7 @@ func BuildInputVersion(
 	summary := InputVersionSummary{
 		UsedPodCount:     len(eligible),
 		ExcludedPodCount: len(allPods) - len(eligible),
+		FailedPodCount:   failedCount,
 	}
 
 	return events, summary, nil
