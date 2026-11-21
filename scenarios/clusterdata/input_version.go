@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
+	"sort"
 	"strings"
 	"time"
 
@@ -48,36 +50,71 @@ func BuildInputVersion(
 		return nil, InputVersionSummary{}, err
 	}
 
-	var (
-		eligible    []openbPodRecord
-		failedCount int
-	)
+	var eligible []openbPodRecord
 	for _, p := range allPods {
 		if strings.EqualFold(p.phase, "Pending") {
 			continue
 		}
-		if strings.EqualFold(p.phase, "Failed") {
-			failedCount++
-		}
 		eligible = append(eligible, p)
 	}
 
-	events := make([]definition.Event, 0, len(nodeEvents)+len(eligible)+len(nodes))
+	rng := rand.New(rand.NewSource(seed))
+	used := sampleAndOrderPods(eligible, sampleRatio, rng)
+
+	failedCount := 0
+	for _, p := range used {
+		if strings.EqualFold(p.phase, "Failed") {
+			failedCount++
+		}
+	}
+
+	events := make([]definition.Event, 0, len(nodeEvents)+len(used)+len(nodes))
 	events = append(events, nodeEvents...)
 
-	for _, p := range eligible {
+	for _, p := range used {
 		events = append(events, definition.NewEvent(definition.EventTypeCreate, buildInputVersionJob(p), defaultInterval))
 	}
 
 	events = append(events, inputVersionNodeDeleteEvents(nodes)...)
 
 	summary := InputVersionSummary{
-		UsedPodCount:     len(eligible),
-		ExcludedPodCount: len(allPods) - len(eligible),
+		UsedPodCount:     len(used),
+		ExcludedPodCount: len(allPods) - len(used),
 		FailedPodCount:   failedCount,
 	}
 
 	return events, summary, nil
+}
+
+// sampleAndOrderPods draws sampleRatio of eligible using rng, then orders
+// the result by creation_time, shuffling the submission order of pods that
+// share the same creation_time (also using rng, so the same seed always
+// produces the same sample and the same order).
+func sampleAndOrderPods(eligible []openbPodRecord, sampleRatio float64, rng *rand.Rand) []openbPodRecord {
+	perm := rng.Perm(len(eligible))
+	usedCount := int(float64(len(eligible))*sampleRatio + 0.5)
+
+	used := make([]openbPodRecord, 0, usedCount)
+	for _, i := range perm[:usedCount] {
+		used = append(used, eligible[i])
+	}
+
+	sort.SliceStable(used, func(i, j int) bool {
+		return used[i].creationTime < used[j].creationTime
+	})
+
+	for start := 0; start < len(used); {
+		end := start + 1
+		for end < len(used) && used[end].creationTime == used[start].creationTime {
+			end++
+		}
+		rng.Shuffle(end-start, func(i, j int) {
+			used[start+i], used[start+j] = used[start+j], used[start+i]
+		})
+		start = end
+	}
+
+	return used
 }
 
 // openbPodRecord is one row of the openb pod CSV, parsed into typed fields.
