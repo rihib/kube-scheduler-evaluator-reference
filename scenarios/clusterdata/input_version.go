@@ -267,6 +267,9 @@ func parseInputVersionPods(podsCSV io.Reader) ([]openbPodRecord, error) {
 		if err != nil {
 			return nil, err
 		}
+		if deletionTime < scheduledTime {
+			return nil, fmt.Errorf("clusterdata: negative execution duration for %s", name)
+		}
 
 		records = append(records, openbPodRecord{
 			name:          name,
