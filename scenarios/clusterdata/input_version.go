@@ -78,6 +78,12 @@ func BuildInputVersion(
 	capacity := nodeCapacityTotals(nodes)
 	demand := podDemandTotals(used)
 	periodBeforeScaling := submissionPeriodSeconds(used)
+	if len(used) > 0 && periodBeforeScaling <= 0 {
+		return nil, InputVersionSummary{}, fmt.Errorf("clusterdata: submission period is zero; every used pod shares the same creation_time, so rho cannot be computed")
+	}
+	if len(used) > 0 && capacity.cpuMilli <= 0 && capacity.memoryMiB <= 0 && capacity.gpu <= 0 {
+		return nil, InputVersionSummary{}, fmt.Errorf("clusterdata: no node has any capacity; rho cannot be computed")
+	}
 	rhoBeforeScaling := rho(demand, capacity, periodBeforeScaling)
 
 	multiplier := rhoBeforeScaling / targetRho
@@ -283,7 +289,14 @@ func parseInputVersionPods(podsCSV io.Reader) ([]openbPodRecord, error) {
 		// scheduled_time is empty for Pending pods in the openb trace (they
 		// were never scheduled). BuildInputVersion excludes Pending pods, so
 		// this value is unused for them; parse it as 0 instead of failing.
-		scheduledTime, err := parseOptionalIntField(record[10], "scheduled_time")
+		// Any other phase with an empty scheduled_time is unexpected data,
+		// so it is still treated as an error.
+		var scheduledTime int64
+		if strings.EqualFold(phase, "Pending") {
+			scheduledTime, err = parseOptionalIntField(record[10], "scheduled_time")
+		} else {
+			scheduledTime, err = parseIntField(record[10], "scheduled_time")
+		}
 		if err != nil {
 			return nil, err
 		}

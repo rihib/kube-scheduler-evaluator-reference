@@ -75,7 +75,8 @@ func TestBuildInputVersion_UsesAllNodes(t *testing.T) {
 		"openb-node-0000,32000,262144,0,\n" +
 		"openb-node-0001,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n")
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
 	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
@@ -86,8 +87,8 @@ func TestBuildInputVersion_UsesAllNodes(t *testing.T) {
 	if nodeCreates != 2 {
 		t.Errorf("node create events = %d, want 2", nodeCreates)
 	}
-	if summary.UsedPodCount != 1 {
-		t.Errorf("UsedPodCount = %d, want 1", summary.UsedPodCount)
+	if summary.UsedPodCount != 2 {
+		t.Errorf("UsedPodCount = %d, want 2", summary.UsedPodCount)
 	}
 }
 
@@ -96,7 +97,8 @@ func TestBuildInputVersion_ExcludesPendingPods(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
 		"openb-pod-pending,1000,1024,0,0,,LS,Pending,0,100,10\n" +
-		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n")
+		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-running2,1000,1024,0,0,,LS,Running,50,150,60\n")
 
 	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
@@ -104,11 +106,11 @@ func TestBuildInputVersion_ExcludesPendingPods(t *testing.T) {
 	}
 
 	names := jobCreateNames(events)
-	if len(names) != 1 || names[0] != "openb-pod-running" {
-		t.Errorf("job create names = %v, want [openb-pod-running]", names)
+	if slices.Contains(names, "openb-pod-pending") {
+		t.Errorf("job create names = %v, want it to not contain openb-pod-pending", names)
 	}
-	if summary.UsedPodCount != 1 {
-		t.Errorf("UsedPodCount = %d, want 1", summary.UsedPodCount)
+	if summary.UsedPodCount != 2 {
+		t.Errorf("UsedPodCount = %d, want 2", summary.UsedPodCount)
 	}
 	if summary.ExcludedPodCount != 1 {
 		t.Errorf("ExcludedPodCount = %d, want 1", summary.ExcludedPodCount)
@@ -121,7 +123,8 @@ func TestBuildInputVersion_KeepsFailedPods(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
 		"openb-pod-failed,1000,1024,0,0,,LS,Failed,0,100,10\n" +
-		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n")
+		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-running2,1000,1024,0,0,,LS,Running,50,150,60\n")
 
 	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
@@ -129,11 +132,11 @@ func TestBuildInputVersion_KeepsFailedPods(t *testing.T) {
 	}
 
 	names := jobCreateNames(events)
-	if len(names) != 2 {
-		t.Errorf("job create names = %v, want 2 names (failed pod kept)", names)
+	if len(names) != 3 {
+		t.Errorf("job create names = %v, want 3 names (failed pod kept)", names)
 	}
-	if summary.UsedPodCount != 2 {
-		t.Errorf("UsedPodCount = %d, want 2", summary.UsedPodCount)
+	if summary.UsedPodCount != 3 {
+		t.Errorf("UsedPodCount = %d, want 3", summary.UsedPodCount)
 	}
 	if summary.FailedPodCount != 1 {
 		t.Errorf("FailedPodCount = %d, want 1", summary.FailedPodCount)
@@ -144,7 +147,8 @@ func TestBuildInputVersion_KeepsFailedPods(t *testing.T) {
 func TestBuildInputVersion_ExecutionDurationIsDeletionMinusScheduled(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n")
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
 	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
@@ -169,7 +173,8 @@ func TestBuildInputVersion_ExecutionDurationIsDeletionMinusScheduled(t *testing.
 func TestBuildInputVersion_GPUMilliAnnotationIsDefaultPerGPU(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,2,V100M16\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,1,1000,,LS,Running,0,100,10\n")
+		"openb-pod-0000,1000,1024,1,1000,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
 	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
@@ -192,7 +197,8 @@ func TestBuildInputVersion_GPUMilliAnnotationIsDefaultPerGPU(t *testing.T) {
 func TestBuildInputVersion_AddsNodeAffinityFromGPUSpec(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,1,1000,V100M16|V100M32,LS,Running,0,100,10\n")
+		"openb-pod-0000,1000,1024,1,1000,V100M16|V100M32,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
 	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
@@ -230,7 +236,8 @@ func TestBuildInputVersion_AddsNodeAffinityFromGPUSpec(t *testing.T) {
 func TestBuildInputVersion_NoNodeAffinityWithoutGPUSpec(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n")
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
 	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
@@ -293,12 +300,18 @@ func TestBuildInputVersion_SameSeedProducesSameSample(t *testing.T) {
 	}
 }
 
+// sixPodsAtTheSameCreationTimeCSV returns six pods sharing creation_time 0,
+// plus one anchor pod far away in time so the submission period is not
+// zero (BuildInputVersion requires that to compute rho). The anchor's
+// creation_time never collides with the group of six, so it does not
+// affect which of the six pods tie for the same submission time.
 func sixPodsAtTheSameCreationTimeCSV() *strings.Reader {
 	var b strings.Builder
 	b.WriteString(podsCSVHeader)
 	for i := 0; i < 6; i++ {
 		fmt.Fprintf(&b, "openb-pod-%04d,1000,1024,0,0,,LS,Running,0,100,10\n", i)
 	}
+	b.WriteString("openb-pod-anchor,1000,1024,0,0,,LS,Running,1000000,1000100,1000010\n")
 	return strings.NewReader(b.String())
 }
 
@@ -427,14 +440,15 @@ func TestBuildInputVersion_PendingPodWithEmptyScheduledTimeDoesNotError(t *testi
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
 		"openb-pod-pending,1000,1024,0,0,,LS,Pending,0,100,\n" +
-		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n")
+		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-running2,1000,1024,0,0,,LS,Running,50,150,60\n")
 
 	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
-	if summary.UsedPodCount != 1 {
-		t.Errorf("UsedPodCount = %d, want 1", summary.UsedPodCount)
+	if summary.UsedPodCount != 2 {
+		t.Errorf("UsedPodCount = %d, want 2", summary.UsedPodCount)
 	}
 }
 
@@ -523,7 +537,8 @@ func TestBuildInputVersion_ErrorsOnEmptyScheduledTimeForNonPendingPod(t *testing
 func TestBuildInputVersion_JobResourceRequestsMatchCSV(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,2,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1234,5678,3,0,,LS,Running,0,100,10\n")
+		"openb-pod-0000,1234,5678,3,0,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
 	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
