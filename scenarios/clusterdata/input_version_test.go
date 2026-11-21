@@ -221,3 +221,50 @@ func TestBuildInputVersion_NoNodeAffinityWithoutGPUSpec(t *testing.T) {
 		t.Errorf("affinity = %+v, want nil", job.Spec.Template.Spec.Affinity)
 	}
 }
+
+func tenEligiblePodsCSV() *strings.Reader {
+	var b strings.Builder
+	b.WriteString(podsCSVHeader)
+	for i := 0; i < 10; i++ {
+		fmt.Fprintf(&b, "openb-pod-%04d,1000,1024,0,0,,LS,Running,%d,%d,%d\n", i, i*10, i*10+100, i*10+10)
+	}
+	return strings.NewReader(b.String())
+}
+
+// 入力の版は、シードから Pending を除いた Pod の80%を抜き出す。
+func TestBuildInputVersion_SamplesEightyPercentOfEligiblePods(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+
+	_, summary, err := BuildInputVersion(nodesCSV, tenEligiblePodsCSV(), 1, 1.0, 0.8)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	if summary.UsedPodCount != 8 {
+		t.Errorf("UsedPodCount = %d, want 8", summary.UsedPodCount)
+	}
+	if summary.ExcludedPodCount != 2 {
+		t.Errorf("ExcludedPodCount = %d, want 2", summary.ExcludedPodCount)
+	}
+}
+
+// 同じシードなら、抜き出される Pod の集合と順が同じになる。
+func TestBuildInputVersion_SameSeedProducesSameSample(t *testing.T) {
+	nodesCSV1 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	nodesCSV2 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+
+	events1, _, err := BuildInputVersion(nodesCSV1, tenEligiblePodsCSV(), 42, 1.0, 0.8)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+	events2, _, err := BuildInputVersion(nodesCSV2, tenEligiblePodsCSV(), 42, 1.0, 0.8)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	names1 := jobCreateNames(events1)
+	names2 := jobCreateNames(events2)
+	if !slices.Equal(names1, names2) {
+		t.Errorf("same seed produced different samples: %v vs %v", names1, names2)
+	}
+}
