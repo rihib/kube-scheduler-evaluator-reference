@@ -163,6 +163,30 @@ func TestBuildInputVersion_ExecutionDurationIsDeletionMinusScheduled(t *testing.
 	}
 }
 
+// GPU を要求する Pod には gpu-milli 注釈にGPU1枚あたりの既定値（1000）を
+// 入れる。evaluator はこの注釈を num_gpu×1000 の既定より優先するので、0の
+// ままだと GPU を要求する Pod すべての GPU 利用率が記録上0になってしまう。
+func TestBuildInputVersion_GPUMilliAnnotationIsDefaultPerGPU(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,2,V100M16\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,1,1000,,LS,Running,0,100,10\n")
+
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	job := jobCreateByName(events, "openb-pod-0000")
+	if job == nil {
+		t.Fatalf("no create event for openb-pod-0000")
+	}
+	key := fmt.Sprintf("%s/gpu-milli", consts.UserID)
+	got := job.Spec.Template.Annotations[key]
+	if got != "1000" {
+		t.Errorf("gpu-milli annotation = %q, want %q", got, "1000")
+	}
+}
+
 // gpu_spec が空でない Pod には、GPU の型のラベルが指定された型のどれかに
 // 一致するノードにだけ置けるよう nodeAffinity を付ける。
 func TestBuildInputVersion_AddsNodeAffinityFromGPUSpec(t *testing.T) {
@@ -310,7 +334,10 @@ func TestBuildInputVersion_ShufflesOrderOfSameCreationTime(t *testing.T) {
 	}
 }
 
-// Pod は creation_time の間隔で投入される。この CSV の ρ はちょうど
+// Pod は creation_time の間隔で投入される。evaluator はイベントに付けた
+// interval をそのイベント自身の発火の前に足す（イベント自身の待ち時間であり、
+// 次のイベントまでの待ち時間ではない）ので、最初の Pod の interval は0、
+// それ以降は直前の Pod との creation_time の差になる。この CSV の ρ はちょうど
 // 0.9375（0.9375は 1000*1000*3 / (32000*100) の cpu の ρ）になるので、
 // targetRho に同じ値を渡せば倍率が1になり、間隔はそのまま creation_time
 // の差になる。
@@ -335,11 +362,14 @@ func TestBuildInputVersion_SubmissionIntervalIsCreationTimeGap(t *testing.T) {
 	if len(intervals) != 3 {
 		t.Fatalf("got %d pod create events, want 3", len(intervals))
 	}
-	if intervals[0] != 30*time.Second {
-		t.Errorf("intervals[0] = %v, want 30s", intervals[0])
+	if intervals[0] != 0 {
+		t.Errorf("intervals[0] = %v, want 0 (first pod has no preceding gap)", intervals[0])
 	}
-	if intervals[1] != 70*time.Second {
-		t.Errorf("intervals[1] = %v, want 70s", intervals[1])
+	if intervals[1] != 30*time.Second {
+		t.Errorf("intervals[1] = %v, want 30s", intervals[1])
+	}
+	if intervals[2] != 70*time.Second {
+		t.Errorf("intervals[2] = %v, want 70s", intervals[2])
 	}
 }
 
@@ -405,5 +435,34 @@ func TestBuildInputVersion_PendingPodWithEmptyScheduledTimeDoesNotError(t *testi
 	}
 	if summary.UsedPodCount != 1 {
 		t.Errorf("UsedPodCount = %d, want 1", summary.UsedPodCount)
+	}
+}
+
+// sampleRatio が0〜1の範囲を外れると、不正な入力としてエラーを返す。
+func TestBuildInputVersion_ErrorsOnSampleRatioOutOfRange(t *testing.T) {
+	for _, ratio := range []float64{-0.5, 1.5} {
+		nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+		podsCSV := strings.NewReader(podsCSVHeader +
+			"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n")
+
+		_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, ratio)
+		if err == nil {
+			t.Errorf("ratio=%v: BuildInputVersion returned no error", ratio)
+		}
+	}
+}
+
+// 目標の ρ が0以下だと、倍率が無視されたことが研究者に伝わらないまま
+// 成功してしまうので、不正な入力としてエラーを返す。
+func TestBuildInputVersion_ErrorsOnNonPositiveTargetRho(t *testing.T) {
+	for _, targetRho := range []float64{0, -1} {
+		nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+		podsCSV := strings.NewReader(podsCSVHeader +
+			"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n")
+
+		_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, targetRho, 1.0)
+		if err == nil {
+			t.Errorf("targetRho=%v: BuildInputVersion returned no error", targetRho)
+		}
 	}
 }
