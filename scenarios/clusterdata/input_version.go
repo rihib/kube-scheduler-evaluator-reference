@@ -68,19 +68,29 @@ func BuildInputVersion(
 		}
 	}
 
-	events := make([]definition.Event, 0, len(nodeEvents)+len(used)+len(nodes))
-	events = append(events, nodeEvents...)
+	capacity := nodeCapacityTotals(nodes)
+	demand := podDemandTotals(used)
+	periodBeforeScaling := submissionPeriodSeconds(used)
+	rhoBeforeScaling := rho(demand, capacity, periodBeforeScaling)
 
-	for _, p := range used {
-		events = append(events, definition.NewEvent(definition.EventTypeCreate, buildInputVersionJob(p), defaultInterval))
+	multiplier := 1.0
+	if targetRho > 0 {
+		multiplier = rhoBeforeScaling / targetRho
 	}
 
+	events := make([]definition.Event, 0, len(nodeEvents)+len(used)+len(nodes))
+	events = append(events, nodeEvents...)
+	events = append(events, buildInputVersionPodEvents(used, multiplier)...)
 	events = append(events, inputVersionNodeDeleteEvents(nodes)...)
+
+	rhoAfterScaling := rho(demand, capacity, periodBeforeScaling*multiplier)
 
 	summary := InputVersionSummary{
 		UsedPodCount:     len(used),
 		ExcludedPodCount: len(allPods) - len(used),
 		FailedPodCount:   failedCount,
+		RhoBeforeScaling: rhoBeforeScaling,
+		RhoAfterScaling:  rhoAfterScaling,
 	}
 
 	return events, summary, nil
@@ -105,6 +115,88 @@ func sampleAndOrderPods(eligible []openbPodRecord, sampleRatio float64, rng *ran
 	})
 
 	return used
+}
+
+// resourceTotals holds a quantity (a demand or a capacity) for each of the
+// three resources rho is computed over.
+type resourceTotals struct {
+	cpuMilli  float64
+	memoryMiB float64
+	gpu       float64
+}
+
+// podDemandTotals sums, for each resource, the request times the execution
+// duration (in seconds) over pods.
+func podDemandTotals(pods []openbPodRecord) resourceTotals {
+	var t resourceTotals
+	for _, p := range pods {
+		durationSeconds := float64(p.deletionTime - p.scheduledTime)
+		t.cpuMilli += float64(p.cpuMilli) * durationSeconds
+		t.memoryMiB += float64(p.memoryMiB) * durationSeconds
+		t.gpu += float64(p.gpuCount) * durationSeconds
+	}
+	return t
+}
+
+// nodeCapacityTotals sums the capacity of every node for each resource.
+func nodeCapacityTotals(nodes []*corev1.Node) resourceTotals {
+	var t resourceTotals
+	for _, n := range nodes {
+		t.cpuMilli += float64(n.Status.Capacity.Cpu().MilliValue())
+		t.memoryMiB += float64(n.Status.Capacity.Memory().Value()) / (1024 * 1024)
+		if gpu, ok := n.Status.Capacity[corev1.ResourceName("nvidia.com/gpu")]; ok {
+			t.gpu += float64(gpu.Value())
+		}
+	}
+	return t
+}
+
+// submissionPeriodSeconds is the observation period of pods ordered by
+// creation_time: from the first submission to the last.
+func submissionPeriodSeconds(pods []openbPodRecord) float64 {
+	if len(pods) == 0 {
+		return 0
+	}
+	return float64(pods[len(pods)-1].creationTime - pods[0].creationTime)
+}
+
+// rho is the load factor: for each resource with nonzero capacity, demand
+// divided by (capacity * periodSeconds), and the maximum across resources.
+func rho(demand, capacity resourceTotals, periodSeconds float64) float64 {
+	if periodSeconds <= 0 {
+		return 0
+	}
+	max := 0.0
+	for _, r := range []struct{ demand, capacity float64 }{
+		{demand.cpuMilli, capacity.cpuMilli},
+		{demand.memoryMiB, capacity.memoryMiB},
+		{demand.gpu, capacity.gpu},
+	} {
+		if r.capacity <= 0 {
+			continue
+		}
+		ratio := r.demand / (r.capacity * periodSeconds)
+		if ratio > max {
+			max = ratio
+		}
+	}
+	return max
+}
+
+// buildInputVersionPodEvents builds the pod Create events in submission
+// order, scaling the interval to the next pod's creation_time by
+// multiplier so that the resulting rho matches targetRho.
+func buildInputVersionPodEvents(pods []openbPodRecord, multiplier float64) []definition.Event {
+	events := make([]definition.Event, 0, len(pods))
+	for i, p := range pods {
+		interval := defaultInterval
+		if i+1 < len(pods) {
+			gapSeconds := float64(pods[i+1].creationTime - p.creationTime)
+			interval = time.Duration(gapSeconds * multiplier * float64(time.Second))
+		}
+		events = append(events, definition.NewEvent(definition.EventTypeCreate, buildInputVersionJob(p), interval))
+	}
+	return events
 }
 
 // openbPodRecord is one row of the openb pod CSV, parsed into typed fields.

@@ -317,9 +317,9 @@ func TestBuildInputVersion_ShufflesOrderOfSameCreationTime(t *testing.T) {
 func TestBuildInputVersion_SubmissionIntervalIsCreationTimeGap(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n"+
-			"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n"+
-			"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n")
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n" +
+		"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n")
 
 	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.9375, 1.0)
 	if err != nil {
@@ -361,9 +361,9 @@ func TestBuildInputVersion_RhoBeforeAndAfterScaling(t *testing.T) {
 	// cpuの0.9375になる。
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n"+
-			"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n"+
-			"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n")
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n" +
+		"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n")
 
 	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.1, 1.0)
 	if err != nil {
