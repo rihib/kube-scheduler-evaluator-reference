@@ -3,7 +3,9 @@ package clusterdata
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/consts"
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +32,22 @@ func isNodeObject(o any) bool {
 func isReplicaSetObject(o any) bool {
 	_, ok := o.(*appsv1.ReplicaSet)
 	return ok
+}
+
+// jobCreateByName returns the ReplicaSet created by events whose name is
+// name, or nil if there is no such Create event.
+func jobCreateByName(events []definition.Event, name string) *appsv1.ReplicaSet {
+	for _, e := range events {
+		if e.EventType() != definition.EventTypeCreate {
+			continue
+		}
+		job, ok := e.Object().(*appsv1.ReplicaSet)
+		if !ok || job.Name != name {
+			continue
+		}
+		return job
+	}
+	return nil
 }
 
 // jobCreateNames returns the names of the ReplicaSets created by events, in
@@ -117,5 +135,28 @@ func TestBuildInputVersion_KeepsFailedPods(t *testing.T) {
 	}
 	if summary.FailedPodCount != 1 {
 		t.Errorf("FailedPodCount = %d, want 1", summary.FailedPodCount)
+	}
+}
+
+// 実行時間は、deletion_time から scheduled_time を引いた値にする。
+func TestBuildInputVersion_ExecutionDurationIsDeletionMinusScheduled(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n")
+
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	job := jobCreateByName(events, "openb-pod-0000")
+	if job == nil {
+		t.Fatalf("no create event for openb-pod-0000")
+	}
+	key := definition.ExecutionDurationAnnotationKey(consts.UserID)
+	got := job.Spec.Template.Annotations[key]
+	want := (90 * time.Second).String()
+	if got != want {
+		t.Errorf("execution duration annotation = %q, want %q", got, want)
 	}
 }
