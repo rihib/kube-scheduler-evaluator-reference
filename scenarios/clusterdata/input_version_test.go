@@ -342,3 +342,38 @@ func TestBuildInputVersion_SubmissionIntervalIsCreationTimeGap(t *testing.T) {
 		t.Errorf("intervals[1] = %v, want 70s", intervals[1])
 	}
 }
+
+func approxEqual(a, b, epsilon float64) bool {
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= epsilon
+}
+
+// ρ は、資源ごとの要求量×実行時間の合計を容量の合計×投入期間で割った値の
+// 最大値である。倍率をかけた後の ρ は、目標の ρ に一致する。
+func TestBuildInputVersion_RhoBeforeAndAfterScaling(t *testing.T) {
+	// 1ノード（cpu=32000m, mem=262144Mi）、3つのPod（各cpu=1000m,
+	// mem=1024Mi、実行時間1000s）、creation_timeは0, 30, 100（投入期間
+	// 100s）。手で求めたcpuのρ = 1000*1000*3 / (32000*100) = 0.9375、
+	// memのρ = 1024*1000*3 / (262144*100) ≈ 0.01172 なので、最大は
+	// cpuの0.9375になる。
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n"+
+			"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n"+
+			"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n")
+
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.1, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	if !approxEqual(summary.RhoBeforeScaling, 0.9375, 1e-9) {
+		t.Errorf("RhoBeforeScaling = %v, want 0.9375", summary.RhoBeforeScaling)
+	}
+	if !approxEqual(summary.RhoAfterScaling, 1.1, 1e-9) {
+		t.Errorf("RhoAfterScaling = %v, want 1.1", summary.RhoAfterScaling)
+	}
+}
