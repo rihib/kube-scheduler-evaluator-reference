@@ -170,13 +170,22 @@ func nodeCapacityTotals(nodes []*corev1.Node) resourceTotals {
 	return t
 }
 
-// submissionPeriodSeconds is the observation period of pods ordered by
-// creation_time: from the first submission to the last.
+// submissionPeriodSeconds is the observation period of pods: from the
+// earliest submission to the latest, regardless of pods' order.
 func submissionPeriodSeconds(pods []openbPodRecord) float64 {
 	if len(pods) == 0 {
 		return 0
 	}
-	return float64(pods[len(pods)-1].creationTime - pods[0].creationTime)
+	min, max := pods[0].creationTime, pods[0].creationTime
+	for _, p := range pods[1:] {
+		if p.creationTime < min {
+			min = p.creationTime
+		}
+		if p.creationTime > max {
+			max = p.creationTime
+		}
+	}
+	return float64(max - min)
 }
 
 // rho is the load factor: for each resource with nonzero capacity, demand
