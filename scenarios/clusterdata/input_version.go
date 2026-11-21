@@ -42,22 +42,31 @@ func BuildInputVersion(
 		return nil, InputVersionSummary{}, err
 	}
 
-	pods, err := parseInputVersionPods(podsCSV)
+	allPods, err := parseInputVersionPods(podsCSV)
 	if err != nil {
 		return nil, InputVersionSummary{}, err
 	}
 
-	events := make([]definition.Event, 0, len(nodeEvents)+len(pods)+len(nodes))
+	var eligible []openbPodRecord
+	for _, p := range allPods {
+		if strings.EqualFold(p.phase, "Pending") {
+			continue
+		}
+		eligible = append(eligible, p)
+	}
+
+	events := make([]definition.Event, 0, len(nodeEvents)+len(eligible)+len(nodes))
 	events = append(events, nodeEvents...)
 
-	for _, p := range pods {
+	for _, p := range eligible {
 		events = append(events, definition.NewEvent(definition.EventTypeCreate, buildInputVersionJob(p), defaultInterval))
 	}
 
 	events = append(events, inputVersionNodeDeleteEvents(nodes)...)
 
 	summary := InputVersionSummary{
-		UsedPodCount: len(pods),
+		UsedPodCount:     len(eligible),
+		ExcludedPodCount: len(allPods) - len(eligible),
 	}
 
 	return events, summary, nil
