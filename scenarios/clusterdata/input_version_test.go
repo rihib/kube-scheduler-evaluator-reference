@@ -390,3 +390,20 @@ func TestBuildInputVersion_ErrorsOnNegativeExecutionDuration(t *testing.T) {
 		t.Fatal("BuildInputVersion returned no error for a negative execution duration")
 	}
 }
+
+// openb の実データでは、Pending の Pod は scheduled_time が空になる。
+// Pending は入力の版から除くので、このフィールドが空でも失敗しない。
+func TestBuildInputVersion_PendingPodWithEmptyScheduledTimeDoesNotError(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-pending,1000,1024,0,0,,LS,Pending,0,100,\n" +
+		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n")
+
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+	if summary.UsedPodCount != 1 {
+		t.Errorf("UsedPodCount = %d, want 1", summary.UsedPodCount)
+	}
+}
