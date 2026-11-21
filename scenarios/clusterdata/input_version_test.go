@@ -94,3 +94,28 @@ func TestBuildInputVersion_ExcludesPendingPods(t *testing.T) {
 		t.Errorf("ExcludedPodCount = %d, want 1", summary.ExcludedPodCount)
 	}
 }
+
+// pod_phase が Failed の Pod は、ほかの Pod と同じく入力の版に残り、実行時間が
+// 経ったら完了する対象として数える。
+func TestBuildInputVersion_KeepsFailedPods(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-failed,1000,1024,0,0,,LS,Failed,0,100,10\n" +
+		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n")
+
+	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	names := jobCreateNames(events)
+	if len(names) != 2 {
+		t.Errorf("job create names = %v, want 2 names (failed pod kept)", names)
+	}
+	if summary.UsedPodCount != 2 {
+		t.Errorf("UsedPodCount = %d, want 2", summary.UsedPodCount)
+	}
+	if summary.FailedPodCount != 1 {
+		t.Errorf("FailedPodCount = %d, want 1", summary.FailedPodCount)
+	}
+}
