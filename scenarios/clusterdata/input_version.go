@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/consts"
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -230,7 +231,7 @@ func inputVersionNodeDeleteEvents(nodes []*corev1.Node) []definition.Event {
 }
 
 func buildInputVersionJob(p openbPodRecord) *appsv1.ReplicaSet {
-	return buildJob(
+	job := buildJob(
 		"default-scheduler",
 		p.name,
 		p.cpuMilli,
@@ -241,4 +242,36 @@ func buildInputVersionJob(p openbPodRecord) *appsv1.ReplicaSet {
 		p.qos,
 		time.Duration(p.deletionTime-p.scheduledTime)*time.Second,
 	)
+	if affinity := gpuSpecNodeAffinity(p.gpuSpec); affinity != nil {
+		job.Spec.Template.Spec.Affinity = affinity
+	}
+	return job
+}
+
+// gpuSpecNodeAffinity turns a non-empty gpu_spec field (a "|"-separated list
+// of GPU model names, e.g. "V100M16|V100M32") into a nodeAffinity that only
+// allows scheduling onto nodes whose model label matches one of them. An
+// empty gpu_spec means no constraint, so it returns nil.
+func gpuSpecNodeAffinity(gpuSpec string) *corev1.Affinity {
+	if gpuSpec == "" {
+		return nil
+	}
+	modelLabelKey := fmt.Sprintf("%s/model", consts.UserID)
+	return &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{
+							{
+								Key:      modelLabelKey,
+								Operator: corev1.NodeSelectorOpIn,
+								Values:   strings.Split(gpuSpec, "|"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }
