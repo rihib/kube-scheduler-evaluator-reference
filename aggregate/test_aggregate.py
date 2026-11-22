@@ -111,3 +111,14 @@ def test_read_record_file_returns_transitions_in_order(tmp_path: Path) -> None:
     assert record.transitions[0].task_immutable["owner"] == "u1"
     assert record.transitions[1].operation == "assign_node"
     assert record.transitions[1].after == "node-1"
+
+
+def test_read_records_from_folder_reads_every_jsonl_file(tmp_path: Path) -> None:
+    write_record_file(tmp_path / "run-a.jsonl", sample_header(scheduler={"profile": "LeastAllocated"}), [])
+    write_record_file(tmp_path / "run-b.jsonl", sample_header(scheduler={"profile": "MostAllocated"}), [])
+    (tmp_path / "not-a-record.txt").write_text("ignore me")
+
+    records = aggregate.read_records_from_folder(tmp_path)
+
+    profiles = sorted(r.header.scheduler_profile for r in records)
+    assert profiles == ["LeastAllocated", "MostAllocated"]
