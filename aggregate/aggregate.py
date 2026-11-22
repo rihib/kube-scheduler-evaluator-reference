@@ -1112,6 +1112,13 @@ def parse_record(text: str) -> RunRecord:
             raise ValueError(f"line {i + 1} is not a JSON object: {line!r}")  # noqa: TRY004
 
     h = lines[0]
+    for field in ("input", "execution", "scheduler"):
+        if not isinstance(h[field], dict):
+            # The header line being an object is not enough: these three
+            # sections are read one level deeper, so a bare value here reached
+            # the same TypeError the check above exists to prevent (round4
+            # review, correctness IMO).
+            raise ValueError(f'header field "{field}" is not a JSON object: {h[field]!r}')  # noqa: TRY004
     header = RunHeader(
         evaluation_id=h["evaluation_id"],
         scenario_id=h["scenario_id"],
