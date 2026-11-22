@@ -701,10 +701,18 @@ def render_rho_markdown(section: RhoSection) -> str:
         lines.append("")
         lines.append(f"{a} − {b}")
         lines.append("")
-        lines.append("| metric | diff |")
-        lines.append("| --- | --- |")
-        for key in sorted(section.diffs):
-            lines.append(f"| {key} | {_format_diff(section.diffs[key])} |")
+        if section.diffs:
+            lines.append("| metric | diff |")
+            lines.append("| --- | --- |")
+            for key in sorted(section.diffs):
+                lines.append(f"| {key} | {_format_diff(section.diffs[key])} |")
+        else:
+            # round2 review, Must: scheduler_order can be set (exactly two
+            # profiles found at this ρ) while diffs is still empty, when the
+            # two profiles never coexist within the same input version
+            # (_diffs_for_group's per-version continue fires every time). A
+            # header with no rows would hide that reason from the reader.
+            lines.append(f"{a} と {b} がどの入力の版でもそろわず、差を計算できなかった。")
         lines.append("")
     else:
         lines.append("### スケジューラの差")
@@ -760,6 +768,15 @@ def render_rho_markdown(section: RhoSection) -> str:
                     else:
                         outcome = "—（予測の対象外）"
                     lines.append(f"| {key} | {_format_diff(diff)} | {outcome} |")
+            else:
+                # round2 review, Must: the same empty-diffs case as the "スケ
+                # ジューラの差" section above (profiles found but never within
+                # the same input version) must not render an empty table here
+                # either.
+                lines.append(
+                    f"{', '.join(section.scheduler_order)} がどの入力の版でもそろわず、"
+                    "予測と結果を示せなかった。"
+                )
             lines.append("")
 
     return "\n".join(lines)
