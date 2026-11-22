@@ -1049,7 +1049,7 @@ def run(
             file=sys.stderr,
         )
     if not records:
-        print(f"error: no complete record with transitions to aggregate under {args.records_dir}", file=sys.stderr)
+        print(f"error: no complete records with transitions to aggregate under {args.records_dir}", file=sys.stderr)
         return 1
 
     writer = writer_factory(Path(args.output_dir))
@@ -1107,8 +1107,9 @@ def parse_record(text: str) -> RunRecord:
             # TypeError from subscripting it further down (round3 review,
             # correctness IMO: run()'s except does not catch that, so a
             # corrupt record killed the command without naming its file).
-            # Hence also the noqa: bad data in a file is a ValueError run()
-            # reports, not a TypeError in calling code, which must crash.
+            # Hence also the noqa. TRY004 is for type bugs in calling code,
+            # which should crash as a TypeError; this is bad data in the file
+            # itself, which run() should report as a parse failure instead.
             raise ValueError(f"line {i + 1} is not a JSON object: {line!r}")  # noqa: TRY004
 
     h = lines[0]
