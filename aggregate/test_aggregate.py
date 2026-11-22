@@ -318,6 +318,30 @@ class RecordBuilder:
         return self
 
 
+def fragmented_record() -> RecordBuilder:
+    """Two 5-cpu nodes and a pending 8-cpu task: the cluster has 10 free cpu in
+    total, but no single node has 8, so _is_fragmentation_blocked reports
+    fragmentation for the whole 10s observation (10 free cpu x 10s = 100)."""
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "5"})
+    b.register_node(0, "node-2", {"cpu": "5"})
+    b.create_task(0, "task-1", "instance-1", cpu="8")
+    b.create_task(10, "task-2", "instance-2", cpu="0")  # marks the end of observation
+    return b
+
+
+def unfragmented_record() -> RecordBuilder:
+    """The same two 5-cpu nodes, but the pending task needs only 4 cpu, which
+    node-1 alone can take: cpu is watched for the same 10s and never
+    fragmented, so unplaceable_free:cpu is a measured 0."""
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "5"})
+    b.register_node(0, "node-2", {"cpu": "5"})
+    b.create_task(0, "task-1", "instance-1", cpu="4")
+    b.create_task(10, "task-2", "instance-2", cpu="0")  # marks the end of observation
+    return b
+
+
 def test_compute_metrics_pending_wait_by_gpu_class_and_count_at_end() -> None:
     b = RecordBuilder()
     b.create_task(0, "task-1", "instance-1", gpu="0")
@@ -444,6 +468,32 @@ def test_compute_metrics_unplaceable_free_misses_fragmentation_across_different_
     # Never falsely reports fragmentation where there is none; this real
     # fragmentation case is a documented false negative, not a crash or a
     # wrong-direction answer.
+    assert metrics.unplaceable_free == {"cpu": 0.0, "nvidia.com/gpu": 0.0}
+
+
+def test_compute_metrics_reports_zero_unplaceable_free_for_a_resource_it_measured_without_fragmentation() -> None:
+    # round3 review, correctness Must 1: a record that watched "cpu" for a
+    # while and never hit fragmentation measured unplaceable_free:cpu and got
+    # 0 — that is a measured 0, not a missing measurement. Leaving the key out
+    # made every downstream step (the diff, the average, the per-run table)
+    # read it as "never measured".
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "10"})
+    b.create_task(0, "task-1", "instance-1", cpu="1")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    b.create_task(10, "task-2", "instance-2", cpu="0")  # marks the end of observation
+
+    metrics = aggregate.compute_metrics(b.transitions)
+
+    assert metrics.unplaceable_free == {"cpu": 0.0}
+
+
+def test_compute_metrics_leaves_unplaceable_free_empty_for_a_record_with_no_interval_to_measure() -> None:
+    # The flip side of the test above: a record with no positive-duration
+    # interval (here: no transitions at all, units/U04.md "着手時に決めること")
+    # measured nothing, so the key really is absent rather than 0.
+    metrics = aggregate.compute_metrics([])
+
     assert metrics.unplaceable_free == {}
 
 
@@ -564,6 +614,41 @@ def test_average_metrics_averages_a_resource_only_over_iterations_that_measured_
 
     assert avg.allocation_rate["cpu"] == pytest.approx(0.4)
     assert avg.unplaceable_free["cpu"] == pytest.approx(10.0)
+
+
+def test_average_metrics_averages_unplaceable_free_over_every_iteration_that_measured_it() -> None:
+    # round3 review, correctness Must 1: an iteration that watched cpu and saw
+    # no fragmentation measured 0, so the version's average must be divided by
+    # both iterations (100 and 0 -> 50). Skipping the calm iteration reported
+    # 100 — twice the fragmentation this version actually showed.
+    iterations = [
+        aggregate.compute_metrics(fragmented_record().transitions),
+        aggregate.compute_metrics(unfragmented_record().transitions),
+    ]
+
+    avg = aggregate.average_metrics(iterations)
+
+    assert avg.unplaceable_free["cpu"] == pytest.approx(50.0)
+
+
+def test_average_metrics_keeps_a_resource_no_iteration_could_measure_out_of_the_average() -> None:
+    # round3 review, test IMO 2: the "no iteration measured this resource at
+    # all" guard. A node that declares a resource with capacity 0 puts it in
+    # unplaceable_free (resource_names includes it) but never in
+    # allocation_rate (_MetricsAccumulator skips a resource whose total
+    # capacity is 0), so allocation_rate must come back without the key rather
+    # than with a None value.
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "5", "nvidia.com/gpu": "0"})
+    b.register_node(0, "node-2", {"cpu": "5", "nvidia.com/gpu": "0"})
+    b.create_task(0, "task-1", "instance-1", cpu="8")
+    b.create_task(10, "task-2", "instance-2", cpu="0")  # marks the end of observation
+
+    avg = aggregate.average_metrics([aggregate.compute_metrics(b.transitions)])
+
+    assert "nvidia.com/gpu" not in avg.allocation_rate
+    assert avg.allocation_rate["cpu"] == pytest.approx(0.0)
+    assert avg.unplaceable_free["nvidia.com/gpu"] == pytest.approx(0.0)
 
 
 def test_mean_optional_skips_none_values() -> None:
@@ -780,6 +865,22 @@ def test_build_rho_sections_does_not_treat_a_transitionless_record_as_measuring_
     assert "wait:1" not in section.diffs
 
 
+def test_build_rho_sections_diffs_unplaceable_free_when_only_one_scheduler_fragmented() -> None:
+    # round3 review, correctness Must 1: both runs watched cpu, so both
+    # measured 置けない空き資源の量 — one got 100, the other a genuine 0. The
+    # diff scenario 6 asks for must stay in the table; dropping the whole row
+    # because one side's dict had no key hid the very difference the
+    # experiment is looking for.
+    records = [
+        make_run_record("LeastAllocated", 1.1, fragmented_record().transitions),
+        make_run_record("MostAllocated", 1.1, unfragmented_record().transitions),
+    ]
+
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    assert section.diffs["unplaceable_free:cpu"].raw == pytest.approx(100.0)
+
+
 def test_build_rho_sections_leaves_diffs_empty_when_no_version_has_both_schedulers() -> None:
     # round2 review, correctness Must: two profiles can be found at a ρ overall
     # while never coexisting within the same input version (e.g. each version
@@ -893,6 +994,44 @@ def test_render_rho_markdown_per_run_table_shows_n_a_for_a_resource_this_run_nev
 
     most_row = next(line for line in md.splitlines() if line.startswith("| MostAllocated |"))
     assert "n/a" in most_row  # MostAllocated's record never registered a cpu resource
+
+
+def _per_run_cell(md: str, scheduler_profile: str, column: str) -> str:
+    """The per-run table's cell for one scheduler's row and one column."""
+    lines = md.splitlines()
+    header = next(line for line in lines if line.startswith("| scheduler |"))
+    row = next(line for line in lines if line.startswith(f"| {scheduler_profile} |"))
+    columns = [c.strip() for c in header.strip("|").split("|")]
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    return cells[columns.index(column)]
+
+
+def test_render_rho_markdown_per_run_table_shows_zero_for_a_resource_measured_without_fragmentation() -> None:
+    # round3 review, correctness Must 1: ρ = 0.5 (the negative control) is
+    # expected to have no fragmentation at all, so showing "n/a" there made
+    # scenario 4's fifth per-run metric unreadable for a whole ρ — the run did
+    # measure 置けない空き資源の量 and it was 0.
+    records = [make_run_record("LeastAllocated", 0.5, unfragmented_record().transitions)]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert _per_run_cell(md, "LeastAllocated", "unplaceable_free:cpu") == "0.0000"
+
+
+def test_render_rho_markdown_per_run_table_shows_n_a_for_cluster_std_a_run_never_measured() -> None:
+    # round3 review, test IMO 3 (half-unfixed from round2): the per-run table's
+    # cluster_std cell goes through _format_optional too, and no test covered
+    # that wiring — only _format_optional itself and the allocation_rate column.
+    no_interval = RecordBuilder()
+    no_interval.create_task(0, "task-1", "instance-1")  # a single instant: no interval to average over
+    records = [make_run_record("LeastAllocated", 0.8, no_interval.transitions)]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert section.runs[0][1].cluster_std is None
+    assert _per_run_cell(md, "LeastAllocated", "cluster_std") == "n/a"
 
 
 def test_render_rho_markdown_links_to_the_figure_for_this_rho() -> None:
