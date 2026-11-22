@@ -352,9 +352,7 @@ class _MetricsAccumulator:
         return self._cluster_std_weighted / self._cluster_std_duration
 
 
-def _censor_still_pending_waits(
-    world: _World, observation_end: float, pending_wait_by_class: dict[str, list[float]]
-) -> tuple[int, int]:
+def _censor_still_pending_waits(world: _World, observation_end: float, pending_wait_by_class: dict[str, list[float]]) -> tuple[int, int]:
     """Adds one right-censored wait (observation_end - pending_since) for every
     instance still pending when the record ends, instead of leaving them out
     of both the distribution and nonzero_wait_fraction's denominator (round1
@@ -845,10 +843,7 @@ def _render_high_load_section(section: RhoSection) -> list[str]:
         # round2 review, Must: no version had both profiles, so nothing at all
         # was diffed (_diffs_for_group's per-version continue fired every
         # time) and an empty table here would hide that reason.
-        lines.append(
-            f"{', '.join(section.scheduler_order)} がどの入力の版でもそろわず、"
-            "予測と結果を示せなかった。"
-        )
+        lines.append(f"{', '.join(section.scheduler_order)} がどの入力の版でもそろわず、予測と結果を示せなかった。")
     else:
         # The diff exists but none of it is about the prediction: all_keys is
         # the wait: / unplaceable_free: subset of section.diffs, so it can be
@@ -1112,7 +1107,9 @@ def parse_record(text: str) -> RunRecord:
             # TypeError from subscripting it further down (round3 review,
             # correctness IMO: run()'s except does not catch that, so a
             # corrupt record killed the command without naming its file).
-            raise ValueError(f"line {i + 1} is not a JSON object: {line!r}")
+            # Hence also the noqa: bad data in a file is a ValueError run()
+            # reports, not a TypeError in calling code, which must crash.
+            raise ValueError(f"line {i + 1} is not a JSON object: {line!r}")  # noqa: TRY004
 
     h = lines[0]
     header = RunHeader(
@@ -1185,9 +1182,7 @@ def classify_gpu_class(gpu_count: float) -> str:
     return "8"
 
 
-_VIRTUAL_TIME_RE = re.compile(
-    r"^(?P<date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(?P<frac>\d+))?(?P<tz>Z|[+-]\d{2}:\d{2})$"
-)
+_VIRTUAL_TIME_RE = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(?P<frac>\d+))?(?P<tz>Z|[+-]\d{2}:\d{2})$")
 
 
 def parse_time(value: str) -> float:

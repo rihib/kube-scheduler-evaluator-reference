@@ -575,24 +575,26 @@ def test_bootstrap_diff_result_does_not_depend_on_other_calls_sharing_a_seed() -
 
 
 def _metrics(**overrides) -> aggregate.Metrics:
-    base = dict(
-        pending_wait_by_class={},
-        pending_count_at_end=0,
-        allocation_rate={},
-        unplaceable_free={},
-        cluster_std=0.0,
-        nonzero_wait_fraction=0.0,
-    )
+    base = {
+        "pending_wait_by_class": {},
+        "pending_count_at_end": 0,
+        "allocation_rate": {},
+        "unplaceable_free": {},
+        "cluster_std": 0.0,
+        "nonzero_wait_fraction": 0.0,
+    }
     base.update(overrides)
     return aggregate.Metrics(**base)
 
 
 def test_average_metrics_averages_scalars_across_iterations() -> None:
     iterations = [
-        _metrics(pending_count_at_end=2, cluster_std=1.0, nonzero_wait_fraction=0.5,
-                  allocation_rate={"cpu": 0.4}, unplaceable_free={"cpu": 10.0}),
-        _metrics(pending_count_at_end=4, cluster_std=3.0, nonzero_wait_fraction=1.0,
-                  allocation_rate={"cpu": 0.6}, unplaceable_free={"cpu": 30.0}),
+        _metrics(
+            pending_count_at_end=2, cluster_std=1.0, nonzero_wait_fraction=0.5, allocation_rate={"cpu": 0.4}, unplaceable_free={"cpu": 10.0}
+        ),
+        _metrics(
+            pending_count_at_end=4, cluster_std=3.0, nonzero_wait_fraction=1.0, allocation_rate={"cpu": 0.6}, unplaceable_free={"cpu": 30.0}
+        ),
     ]
 
     avg = aggregate.average_metrics(iterations)
@@ -1087,9 +1089,7 @@ def test_render_rho_markdown_gives_no_verdict_to_small_gpu_classes_at_high_load(
     )
     assert "8.0000" in large_class_verdict_line
     assert "当たった" in large_class_verdict_line  # LeastAllocated waited 10s vs MostAllocated's 2s
-    small_class_verdict_row_lines = [
-        line for line in md.splitlines() if line.startswith("| wait:0 |") and "対象外" in line
-    ]
+    small_class_verdict_row_lines = [line for line in md.splitlines() if line.startswith("| wait:0 |") and "対象外" in line]
     assert len(small_class_verdict_row_lines) == 1
     assert "当たった" not in small_class_verdict_row_lines[0]
     assert "当たらなかった" not in small_class_verdict_row_lines[0]
@@ -1244,9 +1244,16 @@ def _run_record_text(scheduler_profile: str, rho: float, builder: RecordBuilder)
         header,
         [
             {
-                "time": t.time, "seq": t.seq, "operation": t.operation, "component_id": t.component_id,
-                "task_id": t.task_id, "state": t.state, "state_key": t.state_key, "before": t.before,
-                "after": t.after, "task_immutable": t.task_immutable,
+                "time": t.time,
+                "seq": t.seq,
+                "operation": t.operation,
+                "component_id": t.component_id,
+                "task_id": t.task_id,
+                "state": t.state,
+                "state_key": t.state_key,
+                "before": t.before,
+                "after": t.after,
+                "task_immutable": t.task_immutable,
             }
             for t in builder.transitions
         ],
@@ -1528,9 +1535,7 @@ def test_run_skips_a_record_truncated_on_disk_and_still_succeeds(tmp_path: Path)
     good.create_task(0, "task-1", "instance-1")
     good.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
     (records_dir / "good.jsonl").write_text(_run_record_text("LeastAllocated", 0.5, good))
-    (records_dir / "cut-off.jsonl").write_text(
-        _run_record_text("MostAllocated", 0.5, good) + '{"time": "2024-01-01T00:00:20'
-    )
+    (records_dir / "cut-off.jsonl").write_text(_run_record_text("MostAllocated", 0.5, good) + '{"time": "2024-01-01T00:00:20')
 
     code = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(output_dir)])
 
