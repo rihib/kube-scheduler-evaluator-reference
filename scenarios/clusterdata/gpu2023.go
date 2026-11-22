@@ -62,8 +62,6 @@ func nodeDeleter(ch chan<- definition.Event, nodes []*corev1.Node) {
 	}
 }
 
-// sn,cpu_milli,memory_mib,gpu,model
-// openb-node-0229,96000,786432,8,V100M32
 func nodeGenerator(ch chan<- definition.Event) ([]*corev1.Node, error) {
 	resp, err := http.Get(nodeListURL)
 	if err != nil {
