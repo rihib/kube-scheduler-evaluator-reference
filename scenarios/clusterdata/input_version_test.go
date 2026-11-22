@@ -2,6 +2,7 @@ package clusterdata
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -478,6 +479,35 @@ func TestBuildInputVersion_ErrorsOnNonPositiveTargetRho(t *testing.T) {
 		if err == nil {
 			t.Errorf("targetRho=%v: BuildInputVersion returned no error", targetRho)
 		}
+	}
+}
+
+// sampleRatio が NaN だと、どの比較も偽になって範囲の検査をすり抜け、
+// Pod を1件も使わない空の入力の版が成功として返ってしまう。NaN は
+// 範囲を外れた値として、エラーで返す。
+func TestBuildInputVersion_ErrorsOnNaNSampleRatio(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, math.NaN())
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a NaN sampleRatio")
+	}
+}
+
+// 目標の ρ が NaN だと、倍率も NaN になり、投入の間隔がすべて0の入力の版が
+// 成功として返ってしまう。NaN は正でない値として、エラーで返す。
+func TestBuildInputVersion_ErrorsOnNaNTargetRho(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, math.NaN(), 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a NaN targetRho")
 	}
 }
 
