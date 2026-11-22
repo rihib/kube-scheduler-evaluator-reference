@@ -16,7 +16,9 @@ and internal/record/record.go.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -127,3 +129,27 @@ def classify_gpu_class(gpu_count: float) -> str:
     if gpu_count <= 4:
         return "2-4"
     return "8"
+
+
+_VIRTUAL_TIME_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(?P<frac>\d+))?(?P<tz>Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def parse_time(value: str) -> float:
+    """Parses the evaluator's virtual time (record.go's RFC3339-nano format, which
+    carries 9 fractional digits Go's own time parsing can hold but Python's
+    datetime cannot) into seconds since the Unix epoch, as a float."""
+    m = _VIRTUAL_TIME_RE.match(value)
+    if not m:
+        raise ValueError(f"not a virtual time: {value!r}")
+    dt = datetime.strptime(m.group("date"), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    seconds = dt.timestamp()
+    if m.group("frac"):
+        seconds += float(f"0.{m.group('frac')}")
+    tz = m.group("tz")
+    if tz != "Z":
+        sign = 1 if tz[0] == "+" else -1
+        hh, mm = tz[1:].split(":")
+        seconds -= sign * (int(hh) * 3600 + int(mm) * 60)
+    return seconds
