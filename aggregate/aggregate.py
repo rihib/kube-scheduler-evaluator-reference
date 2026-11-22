@@ -343,6 +343,44 @@ def bootstrap_diff(diffs: list[float], rng, resamples: int = 10000) -> DiffResul
     return DiffResult(raw=None, ci=(float(low), float(high)))
 
 
+@dataclass(frozen=True)
+class VersionAverage:
+    """One (input version, scheduler)'s metrics, averaged over its iterations
+    (decisions.md: "反復の平均をその版の値とする"), ready to diff against another
+    scheduler's VersionAverage for the same version."""
+
+    pending_count_at_end: float
+    allocation_rate: dict[str, float]
+    unplaceable_free: dict[str, float]
+    cluster_std: float
+    nonzero_wait_fraction: float
+    pending_wait_by_class: dict[str, list[float]]  # concatenated across iterations, for display
+    mean_wait_by_class: dict[str, float]  # for diffing
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values)
+
+
+def average_metrics(iterations: list[Metrics]) -> VersionAverage:
+    """Averages one (version, scheduler)'s per-iteration Metrics into a VersionAverage."""
+    resources = {r for m in iterations for r in set(m.allocation_rate) | set(m.unplaceable_free)}
+    pending_wait_by_class: dict[str, list[float]] = {}
+    for m in iterations:
+        for cls, waits in m.pending_wait_by_class.items():
+            pending_wait_by_class.setdefault(cls, []).extend(waits)
+
+    return VersionAverage(
+        pending_count_at_end=_mean([m.pending_count_at_end for m in iterations]),
+        allocation_rate={r: _mean([m.allocation_rate.get(r, 0.0) for m in iterations]) for r in resources},
+        unplaceable_free={r: _mean([m.unplaceable_free.get(r, 0.0) for m in iterations]) for r in resources},
+        cluster_std=_mean([m.cluster_std for m in iterations]),
+        nonzero_wait_fraction=_mean([m.nonzero_wait_fraction for m in iterations]),
+        pending_wait_by_class=pending_wait_by_class,
+        mean_wait_by_class={cls: _mean(waits) for cls, waits in pending_wait_by_class.items()},
+    )
+
+
 def read_record_file(path: Path) -> RunRecord:
     """Reads one run's JSONL record file (header line + transition lines)."""
     with path.open() as f:
