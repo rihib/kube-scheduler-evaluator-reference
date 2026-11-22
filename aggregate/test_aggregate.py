@@ -177,8 +177,10 @@ def test_read_record_texts_from_folder_reads_every_jsonl_file(tmp_path: Path) ->
     texts = aggregate.read_record_texts_from_folder(tmp_path)
 
     assert len(texts) == 2
-    assert sum("LeastAllocated" in t for t in texts) == 1
-    assert sum("MostAllocated" in t for t in texts) == 1
+    paths = [path for path, _ in texts]
+    assert all(p.suffix == ".jsonl" for p in paths)
+    assert sum("LeastAllocated" in t for _, t in texts) == 1
+    assert sum("MostAllocated" in t for _, t in texts) == 1
 
 
 # --- parse_quantity ---
@@ -224,6 +226,22 @@ def test_parse_time_same_instant_is_equal() -> None:
     a = aggregate.parse_time("2024-01-01T00:00:00.000000000Z")
     b = aggregate.parse_time("2024-01-01T00:00:00.000000000Z")
     assert a == b
+
+
+def test_parse_time_handles_a_non_utc_offset() -> None:
+    # Round1 review, test IMO: the +HH:MM/-HH:MM branch (record.go's time format
+    # can carry one, even though the evaluator always writes "Z" today) had no
+    # test.
+    utc = aggregate.parse_time("2024-01-01T00:00:00.000000000Z")
+    plus_nine = aggregate.parse_time("2024-01-01T09:00:00.000000000+09:00")
+    assert utc == pytest.approx(plus_nine)
+
+
+def test_parse_time_rejects_an_invalid_string() -> None:
+    # Round1 review, test IMO: the "does not match the virtual-time format" error
+    # path had no test.
+    with pytest.raises(ValueError, match="not a virtual time"):
+        aggregate.parse_time("not a time")
 
 
 # --- compute_metrics ---
@@ -280,6 +298,25 @@ class RecordBuilder:
         self._write(time, "start", instance_id, task_id=task_id, state="instance_status", before="pending", after="running")
         return self
 
+    def complete(self, time, task_id, instance_id, node_id, allocated: dict[str, str]) -> RecordBuilder:
+        # record.go's Complete: writes the completion, then releases the
+        # instance's allocation (its own `release` helper).
+        self._write(time, "complete", instance_id, task_id=task_id, state="instance_status", before="running", after="completed")
+        self._write(time, "release", node_id, task_id=task_id, state="allocated_resource", state_key=instance_id, before=allocated, after=None)
+        return self
+
+    def deregister_node(self, time, node_id) -> RecordBuilder:
+        self._write(time, "deregister_node", node_id, state="node_information", before=True, after=None)
+        return self
+
+    def delete(self, time, task_id, instance_id, node_id, allocated: dict[str, str]) -> RecordBuilder:
+        # record.go's Delete: completion-independent removal (e.g. preemption).
+        # Reverts assigned_node and releases the allocation, same as Complete.
+        self._write(time, "delete", instance_id, task_id=task_id, state="instance_status", before="running", after="deleted")
+        self._write(time, "delete", instance_id, task_id=task_id, state="assigned_node", before=node_id, after=None)
+        self._write(time, "release", node_id, task_id=task_id, state="allocated_resource", state_key=instance_id, before=allocated, after=None)
+        return self
+
 
 def test_compute_metrics_pending_wait_by_gpu_class_and_count_at_end() -> None:
     b = RecordBuilder()
@@ -289,19 +326,24 @@ def test_compute_metrics_pending_wait_by_gpu_class_and_count_at_end() -> None:
     b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
     b.bind(12, "task-3", "instance-3", "node-1", {"cpu": "1"})
     b.bind(15, "task-2", "instance-2", "node-1", {"cpu": "1"})
-    b.create_task(20, "task-4", "instance-4", gpu="0")  # stays pending
+    b.create_task(20, "task-4", "instance-4", gpu="0")  # stays pending until the end
     b.create_task(20, "task-5", "instance-5", gpu="0")
     b.bind(20, "task-5", "instance-5", "node-1", {"cpu": "1"})  # wait == 0
+    b.create_task(30, "task-6", "instance-6", gpu="0")  # created exactly at the end; marks the end too
 
     metrics = aggregate.compute_metrics(b.transitions)
 
+    # instance-4 and instance-6 are still pending when the record ends (t=30), so their
+    # dwell time so far (observation_end - pending_since) is a right-censored wait, not
+    # excluded (round1 review, Must): excluding it would make a scheduler that leaves
+    # more tasks stuck pending look like it waited *less*, the opposite of reality.
     assert metrics.pending_wait_by_class == {
-        "0": [5.0, 0.0],
+        "0": [5.0, 0.0, 10.0, 0.0],
         "1": [15.0],
         "2-4": [10.0],
     }
-    assert metrics.pending_count_at_end == 1
-    assert metrics.nonzero_wait_fraction == pytest.approx(3 / 4)
+    assert metrics.pending_count_at_end == 2
+    assert metrics.nonzero_wait_fraction == pytest.approx(4 / 6)
 
 
 def test_compute_metrics_allocation_rate_and_unplaceable_free() -> None:
@@ -336,6 +378,66 @@ def test_compute_metrics_cluster_std_is_time_weighted() -> None:
     metrics = aggregate.compute_metrics(b.transitions)
 
     assert metrics.cluster_std == pytest.approx(0.5)
+
+
+def test_compute_metrics_reflects_complete_release_and_deregister_node() -> None:
+    # Round1 review (test Must): complete, release, and deregister_node had no
+    # test exercising them. A broken release (resources never freed, or freed
+    # from the wrong node) or a deregistration that doesn't shrink capacity
+    # would pass silently with allocation_rate/cluster_std just quietly wrong.
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "10"})
+    b.register_node(0, "node-2", {"cpu": "10"})
+    b.create_task(0, "task-a", "instance-a", cpu="4")
+    b.bind(0, "task-a", "instance-a", "node-1", {"cpu": "4"})
+    b.complete(10, "task-a", "instance-a", "node-1", {"cpu": "4"})
+    b.deregister_node(20, "node-1")
+    b.create_task(25, "task-b", "instance-b", cpu="0")  # marks the end of observation
+
+    metrics = aggregate.compute_metrics(b.transitions)
+
+    # Two nodes, cap=20 total. [0,10): allocated=4/cap=20=0.2. [10,20): released,
+    # allocated=0/cap=20=0.0. [20,25): node-1 deregistered, cap=10 (node-2 only),
+    # allocated=0/cap=10=0.0. (0.2*10 + 0.0*10 + 0.0*5) / 25 = 0.08 — if release
+    # left the 4 cpu allocated, this would be higher.
+    assert metrics.allocation_rate["cpu"] == pytest.approx(0.08)
+    # [0,10): node-1 has 1 running pod, node-2 has 0 -> std 0.5. [10,20): completed,
+    # both 0 -> std 0.0. [20,25): node-1 deregistered, only node-2's single value
+    # remains -> std 0.0. (0.5*10 + 0.0*10 + 0.0*5) / 25 = 0.2 — if complete left
+    # instance-a counted as running, this would be higher.
+    assert metrics.cluster_std == pytest.approx(0.2)
+
+
+def test_compute_metrics_reflects_delete_and_release() -> None:
+    # Round1 review (test Must): delete (as opposed to complete) had no test
+    # exercising its own release of the allocation.
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "10"})
+    b.create_task(0, "task-a", "instance-a", cpu="4")
+    b.bind(0, "task-a", "instance-a", "node-1", {"cpu": "4"})
+    b.delete(10, "task-a", "instance-a", "node-1", {"cpu": "4"})
+    b.create_task(20, "task-b", "instance-b", cpu="0")  # marks the end of observation
+
+    metrics = aggregate.compute_metrics(b.transitions)
+
+    # (0.4*10 + 0.0*10) / 20 = 0.2 — if delete's release left the allocation in
+    # place, this would be 0.4 instead.
+    assert metrics.allocation_rate["cpu"] == pytest.approx(0.2)
+
+
+# --- DiffResult ---
+
+
+def test_diff_result_rejects_neither_raw_nor_ci_set() -> None:
+    # Round1 review, maintainability IMO: the "exactly one of raw/ci" invariant
+    # was only a docstring promise; construction must enforce it.
+    with pytest.raises(ValueError, match="exactly one"):
+        aggregate.DiffResult(raw=None, ci=None)
+
+
+def test_diff_result_rejects_both_raw_and_ci_set() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        aggregate.DiffResult(raw=1.0, ci=(0.0, 2.0))
 
 
 # --- bootstrap_diff ---
@@ -487,6 +589,88 @@ def test_build_rho_sections_separates_different_rho_values() -> None:
     assert sorted(s.rho for s in sections) == [0.5, 1.1]
 
 
+def test_build_rho_sections_bootstraps_a_ci_across_two_input_versions() -> None:
+    # Round1 review, test IMO: the version-grouping step that feeds bootstrap_diff
+    # (as opposed to bootstrap_diff itself, which is tested directly with multiple
+    # values) was only ever exercised with a single input version.
+    least_v1 = RecordBuilder()
+    least_v1.create_task(0, "task-1", "instance-1", gpu="0")
+    least_v1.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_v1 = RecordBuilder()
+    most_v1.create_task(0, "task-1", "instance-1", gpu="0")
+    most_v1.bind(30, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    least_v2 = RecordBuilder()
+    least_v2.create_task(0, "task-1", "instance-1", gpu="0")
+    least_v2.bind(20, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_v2 = RecordBuilder()
+    most_v2.create_task(0, "task-1", "instance-1", gpu="0")
+    most_v2.bind(50, "task-1", "instance-1", "node-1", {"cpu": "1"})
+
+    records = [
+        make_run_record("LeastAllocated", 1.1, least_v1.transitions, input_seed="seed-1"),
+        make_run_record("MostAllocated", 1.1, most_v1.transitions, input_seed="seed-1"),
+        make_run_record("LeastAllocated", 1.1, least_v2.transitions, input_seed="seed-2"),
+        make_run_record("MostAllocated", 1.1, most_v2.transitions, input_seed="seed-2"),
+    ]
+
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    # version seed-1's diff is 10-30=-20, seed-2's is 20-50=-30: two versions, so
+    # the result is a bootstrap CI, not a raw value.
+    assert section.diffs["wait:0"].raw is None
+    assert section.diffs["wait:0"].ci is not None
+
+
+def test_build_rho_sections_skips_a_version_missing_one_scheduler() -> None:
+    # Round1 review, test IMO: the continue branch for "this version doesn't have
+    # both schedulers" (e.g. one record was dropped as truncated) was never
+    # exercised by any existing test.
+    least_v1 = RecordBuilder()
+    least_v1.create_task(0, "task-1", "instance-1", gpu="0")
+    least_v1.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_v1 = RecordBuilder()
+    most_v1.create_task(0, "task-1", "instance-1", gpu="0")
+    most_v1.bind(30, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    least_v2_only = RecordBuilder()  # seed-2 has no MostAllocated record at all
+    least_v2_only.create_task(0, "task-1", "instance-1", gpu="0")
+    least_v2_only.bind(20, "task-1", "instance-1", "node-1", {"cpu": "1"})
+
+    records = [
+        make_run_record("LeastAllocated", 1.1, least_v1.transitions, input_seed="seed-1"),
+        make_run_record("MostAllocated", 1.1, most_v1.transitions, input_seed="seed-1"),
+        make_run_record("LeastAllocated", 1.1, least_v2_only.transitions, input_seed="seed-2"),
+    ]
+
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    # Only seed-1 contributed a diff (10-30=-20); seed-2 is skipped, so this is
+    # still a single-version raw value, not a bootstrap CI.
+    assert section.diffs["wait:0"].raw == pytest.approx(-20.0)
+    assert section.diffs["wait:0"].ci is None
+
+
+def test_build_rho_sections_uses_the_given_distributed_scheduler() -> None:
+    # Round1 review, Must: the scheduler sorted first (and compared against in
+    # the ρ = 1.1 prediction) must come from the caller, not a hardcoded
+    # "LeastAllocated" string literal.
+    tetris = RecordBuilder()
+    tetris.create_task(0, "task-1", "instance-1", gpu="0")
+    tetris.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most = RecordBuilder()
+    most.create_task(0, "task-1", "instance-1", gpu="0")
+    most.bind(30, "task-1", "instance-1", "node-1", {"cpu": "1"})
+
+    records = [
+        make_run_record("MostAllocated", 1.1, most.transitions),
+        make_run_record("Tetris", 1.1, tetris.transitions),
+    ]
+
+    section = aggregate.build_rho_sections(records, seed=0, distributed_scheduler="Tetris")[0]
+
+    assert section.scheduler_order == ("Tetris", "MostAllocated")
+    assert section.distributed_scheduler == "Tetris"
+
+
 # --- render_rho_markdown ---
 
 
@@ -534,6 +718,119 @@ def test_render_rho_markdown_rho_1_1_includes_prediction_and_result() -> None:
     # LeastAllocated waited 10s, MostAllocated waited 2s: LeastAllocated is bigger,
     # so the prediction (units/U04.md, experiment.md 3.1) held.
     assert "当たった" in md
+
+
+def test_render_rho_markdown_per_run_table_includes_allocation_rate_and_unplaceable_free() -> None:
+    # Round1 review, Must: scenario 4 needs all 5 per-run metrics, but the table
+    # only ever showed pending_count_at_end / cluster_std / nonzero_wait_fraction.
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "10"})
+    b.create_task(0, "task-1", "instance-1", cpu="4")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "4"})
+    records = [make_run_record("LeastAllocated", 0.8, b.transitions)]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert "allocation_rate:cpu" in md
+    assert "unplaceable_free:cpu" in md
+
+
+def test_render_rho_markdown_links_to_the_figure_for_this_rho() -> None:
+    section = _two_scheduler_section(0.8)
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert aggregate._figure_relpath(0.8) in md
+
+
+def test_render_rho_markdown_gives_no_verdict_to_small_gpu_classes_at_high_load() -> None:
+    # Round1 review (Must, upgraded from IMO): experiment.md 3.1's prediction is
+    # about tasks with a large request; the 0 and 1 GPU classes must be shown
+    # for context without a 当たった/当たらなかった verdict.
+    least = RecordBuilder()
+    least.create_task(0, "task-1", "instance-1", gpu="0")
+    least.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    least.create_task(0, "task-2", "instance-2", gpu="8")
+    least.bind(10, "task-2", "instance-2", "node-1", {"cpu": "1"})
+    most = RecordBuilder()
+    most.create_task(0, "task-1", "instance-1", gpu="0")
+    most.bind(2, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most.create_task(0, "task-2", "instance-2", gpu="8")
+    most.bind(2, "task-2", "instance-2", "node-1", {"cpu": "1"})
+    records = [
+        make_run_record("LeastAllocated", 1.1, least.transitions),
+        make_run_record("MostAllocated", 1.1, most.transitions),
+    ]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    # Both "スケジューラの差" and "予測と結果" have a row starting "| wait:8 |"; the
+    # prediction table's row is the one with a verdict column.
+    large_class_verdict_line = next(
+        line for line in md.splitlines() if line.startswith("| wait:8 |") and ("当たった" in line or "当たらなかった" in line)
+    )
+    assert "8.0000" in large_class_verdict_line
+    assert "当たった" in large_class_verdict_line  # LeastAllocated waited 10s vs MostAllocated's 2s
+    small_class_verdict_row_lines = [
+        line for line in md.splitlines() if line.startswith("| wait:0 |") and "対象外" in line
+    ]
+    assert len(small_class_verdict_row_lines) == 1
+    assert "当たった" not in small_class_verdict_row_lines[0]
+    assert "当たらなかった" not in small_class_verdict_row_lines[0]
+
+
+def test_render_rho_markdown_shows_a_reason_when_there_are_not_exactly_two_schedulers() -> None:
+    # Round1 review, Must: scheduler_order being None (not exactly two profiles)
+    # silently dropped the diff section; it must say why instead.
+    b = RecordBuilder()
+    b.create_task(0, "task-1", "instance-1")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    records = [make_run_record("LeastAllocated", 0.8, b.transitions)]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert section.scheduler_order is None
+    assert "LeastAllocated" in md  # the one profile that was found is named
+    assert "1 個のスケジューラ" in md
+
+
+def test_render_rho_markdown_rho_1_1_section_names_a_missing_distributed_scheduler() -> None:
+    # Round1 review, Must: when the configured distributed scheduler isn't one
+    # of this ρ's profiles, the ρ = 1.1 section must say so instead of just
+    # vanishing (as it did when the check was a literal "LeastAllocated" test).
+    a = RecordBuilder()
+    a.create_task(0, "task-1", "instance-1")
+    a.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    b = RecordBuilder()
+    b.create_task(0, "task-1", "instance-1")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    records = [
+        make_run_record("Tetris", 1.1, a.transitions),
+        make_run_record("MostAllocated", 1.1, b.transitions),
+    ]
+    section = aggregate.build_rho_sections(records, seed=0)[0]  # default distributed_scheduler="LeastAllocated"
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert "予測と結果" in md
+    assert "見つからない" in md
+
+
+def test_render_rho_markdown_treats_a_rho_within_tolerance_as_the_negative_control() -> None:
+    # Round1 review, Must: == on floats can miss a ρ that is meant to be 0.5 but
+    # carries ordinary floating-point noise from upstream computation.
+    b = RecordBuilder()
+    b.create_task(0, "task-1", "instance-1")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    records = [make_run_record("LeastAllocated", 0.5 + 1e-9, b.transitions)]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert "陰性対照" in md
 
 
 # --- write_report ---
@@ -595,7 +892,7 @@ def test_run_reads_and_writes_via_injected_fakes() -> None:
     least = RecordBuilder()
     least.create_task(0, "task-1", "instance-1")
     least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    texts = [_run_record_text("LeastAllocated", 0.5, least)]
+    texts = [(Path("run-a.jsonl"), _run_record_text("LeastAllocated", 0.5, least))]
     writer = FakeReportWriter()
 
     code = aggregate.run(
@@ -634,7 +931,7 @@ def test_run_fails_when_no_records_found() -> None:
 def test_run_fails_when_a_record_fails_to_parse() -> None:
     code = aggregate.run(
         ["--records-dir", "unused", "--output-dir", "unused"],
-        read_record_texts=lambda _: ["not json at all"],
+        read_record_texts=lambda _: [(Path("bad.jsonl"), "not json at all")],
         writer_factory=lambda _: FakeReportWriter(),
     )
 
@@ -648,8 +945,11 @@ def test_run_skips_a_truncated_record_and_still_succeeds_with_the_rest() -> None
     most = RecordBuilder()
     most.create_task(0, "task-1", "instance-1")
     most.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    good_texts = [_run_record_text("LeastAllocated", 0.5, least), _run_record_text("MostAllocated", 0.5, most)]
-    truncated_text = good_texts[0] + '{"time": "2024-01-01T00:00:20'  # cut off mid-line
+    good_texts = [
+        (Path("a.jsonl"), _run_record_text("LeastAllocated", 0.5, least)),
+        (Path("b.jsonl"), _run_record_text("MostAllocated", 0.5, most)),
+    ]
+    truncated_text = (Path("c.jsonl"), good_texts[0][1] + '{"time": "2024-01-01T00:00:20')  # cut off mid-line
     writer = FakeReportWriter()
 
     code = aggregate.run(
@@ -665,7 +965,7 @@ def test_run_skips_a_truncated_record_and_still_succeeds_with_the_rest() -> None
 def test_run_fails_when_every_record_is_truncated() -> None:
     least = RecordBuilder()
     least.create_task(0, "task-1", "instance-1")
-    only_truncated = _run_record_text("LeastAllocated", 0.5, least) + '{"time": "2024-01-01T00:00:20'
+    only_truncated = (Path("a.jsonl"), _run_record_text("LeastAllocated", 0.5, least) + '{"time": "2024-01-01T00:00:20')
 
     code = aggregate.run(
         ["--records-dir", "unused", "--output-dir", "unused"],
