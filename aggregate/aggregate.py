@@ -15,11 +15,29 @@ and internal/record/record.go.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Operation and mutable-state names, mirroring kube-scheduler-evaluator's
+# internal/record/record.go so this module reads the same vocabulary it writes.
+OpCreateTask = "create_task"
+OpRecreate = "recreate"
+OpAssignNode = "assign_node"
+OpStart = "start"
+OpComplete = "complete"
+OpDelete = "delete"
+OpRelease = "release"
+OpRegisterNode = "register_node"
+OpDeregisterNode = "deregister_node"
+
+StateInstanceStatus = "instance_status"
+StateAssignedNode = "assigned_node"
+StateResourceCapacity = "resource_capacity"
+StateAllocatedResource = "allocated_resource"
 
 
 @dataclass(frozen=True)
@@ -79,15 +97,220 @@ class Metrics:
     nonzero_wait_fraction: float
 
 
+def _parsed_resources(raw: dict[str, str] | None) -> dict[str, float]:
+    return {k: parse_quantity(v) for k, v in (raw or {}).items()}
+
+
+class _World:
+    """Mutable reconstruction of the cluster's state as of one point in virtual
+    time, built by replaying a run's transitions in order."""
+
+    def __init__(self) -> None:
+        self.node_capacity: dict[str, dict[str, float]] = {}
+        self.node_allocated: dict[str, dict[str, float]] = {}
+        self.instance_status: dict[str, str] = {}
+        self.instance_node: dict[str, str] = {}
+        self.instance_task: dict[str, str] = {}
+        self.instance_allocation: dict[str, tuple[str, dict[str, float]]] = {}
+        self.task_request: dict[str, dict[str, float]] = {}
+        self.pending_since: dict[str, float] = {}
+
+    def apply(self, tr: Transition, time_val: float, on_wait=None) -> None:
+        op, state = tr.operation, tr.state
+        if op == OpRegisterNode:
+            if state == StateResourceCapacity:
+                self.node_capacity[tr.component_id] = _parsed_resources(tr.after)
+                self.node_allocated.setdefault(tr.component_id, {})
+        elif op == OpDeregisterNode:
+            self.node_capacity.pop(tr.component_id, None)
+            self.node_allocated.pop(tr.component_id, None)
+        elif op in (OpCreateTask, OpRecreate):
+            if state == StateInstanceStatus:
+                self.instance_status[tr.component_id] = "pending"
+                self.instance_task[tr.component_id] = tr.task_id
+                self.pending_since[tr.component_id] = time_val
+                if tr.task_immutable:
+                    self.task_request[tr.task_id] = _parsed_resources(tr.task_immutable.get("resource_request"))
+        elif op == OpAssignNode:
+            if state == StateAssignedNode:
+                self.instance_node[tr.component_id] = tr.after
+            elif state == StateAllocatedResource:
+                node_id, instance_id = tr.component_id, tr.state_key
+                alloc = _parsed_resources(tr.after)
+                allocated = self.node_allocated.setdefault(node_id, {})
+                for r, v in alloc.items():
+                    allocated[r] = allocated.get(r, 0.0) + v
+                self.instance_allocation[instance_id] = (node_id, alloc)
+        elif op == OpStart:
+            instance_id = tr.component_id
+            self.instance_status[instance_id] = "running"
+            start = self.pending_since.pop(instance_id, None)
+            if start is not None and on_wait is not None:
+                on_wait(instance_id, self.instance_task.get(instance_id), time_val - start)
+        elif op == OpComplete:
+            self.instance_status[tr.component_id] = "completed"
+        elif op == OpDelete:
+            if state == StateInstanceStatus:
+                self.instance_status[tr.component_id] = "deleted"
+            elif state == StateAssignedNode:
+                self.instance_node[tr.component_id] = None
+        elif op == OpRelease:
+            instance_id = tr.state_key
+            entry = self.instance_allocation.pop(instance_id, None)
+            if entry is not None:
+                node_id, alloc = entry
+                allocated = self.node_allocated.setdefault(node_id, {})
+                for r, v in alloc.items():
+                    allocated[r] = allocated.get(r, 0.0) - v
+
+    def resource_names(self) -> set[str]:
+        names: set[str] = set()
+        for cap in self.node_capacity.values():
+            names.update(cap.keys())
+        return names
+
+    def capacity_total(self, resource: str) -> float:
+        return sum(cap.get(resource, 0.0) for cap in self.node_capacity.values())
+
+    def allocated_total(self, resource: str) -> float:
+        return sum(alloc.get(resource, 0.0) for alloc in self.node_allocated.values())
+
+    def free_by_node(self, resource: str) -> dict[str, float]:
+        return {
+            node_id: cap.get(resource, 0.0) - self.node_allocated.get(node_id, {}).get(resource, 0.0)
+            for node_id, cap in self.node_capacity.items()
+        }
+
+    def pending_task_requests(self) -> list[dict[str, float]]:
+        return [
+            self.task_request.get(task_id, {})
+            for instance_id, status in self.instance_status.items()
+            if status == "pending" and (task_id := self.instance_task.get(instance_id)) is not None
+        ]
+
+    def running_pod_counts_by_node(self) -> list[int]:
+        counts = {node_id: 0 for node_id in self.node_capacity}
+        for instance_id, status in self.instance_status.items():
+            if status == "running":
+                node_id = self.instance_node.get(instance_id)
+                if node_id in counts:
+                    counts[node_id] += 1
+        return list(counts.values())
+
+
+def _population_stdev(values: list[int]) -> float:
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / len(values)
+    return variance**0.5
+
+
+def _is_fragmentation_blocked(world: _World) -> bool:
+    """True if some pending task's request fits the cluster's aggregate free
+    resources but fits no single node (experiment.md 3.4's 置けない空き資源の量)."""
+    free_by_node_by_resource = {r: world.free_by_node(r) for r in world.resource_names()}
+    for request in world.pending_task_requests():
+        if not any(amount > 0 for amount in request.values()):
+            continue
+        fits_aggregate = all(
+            amount <= 0 or sum(free_by_node_by_resource.get(r, {}).values()) >= amount
+            for r, amount in request.items()
+        )
+        if not fits_aggregate:
+            continue
+        fits_some_node = any(
+            all(amount <= 0 or free_by_node_by_resource.get(r, {}).get(node_id, 0.0) >= amount for r, amount in request.items())
+            for node_id in world.node_capacity
+        )
+        if not fits_some_node:
+            return True
+    return False
+
+
 def compute_metrics(transitions: list[Transition]) -> Metrics:
-    """Computes one run's experiment 1 metrics from its transition record."""
+    """Computes one run's experiment 1 metrics from its transition record
+    (units/U04.md Implementation Decisions, experiment.md 3.4)."""
+    ordered = sorted(transitions, key=lambda t: (parse_time(t.time), t.seq))
+
+    pending_wait_by_class: dict[str, list[float]] = {}
+    nonzero_wait_count = 0
+    wait_count_total = 0
+
+    def on_wait(instance_id: str, task_id: str | None, wait: float) -> None:
+        nonlocal nonzero_wait_count, wait_count_total
+        request = world.task_request.get(task_id, {}) if task_id else {}
+        cls = classify_gpu_class(request.get("nvidia.com/gpu", 0.0))
+        pending_wait_by_class.setdefault(cls, []).append(wait)
+        wait_count_total += 1
+        if wait > 0:
+            nonzero_wait_count += 1
+
+    world = _World()
+    if not ordered:
+        return Metrics(
+            pending_wait_by_class={},
+            pending_count_at_end=0,
+            allocation_rate={},
+            unplaceable_free={},
+            cluster_std=0.0,
+            nonzero_wait_fraction=0.0,
+        )
+
+    alloc_weighted: dict[str, float] = {}
+    alloc_duration: dict[str, float] = {}
+    unplaceable_sum: dict[str, float] = {}
+    cluster_std_weighted = 0.0
+    cluster_std_duration = 0.0
+
+    snapshots: list[tuple[float, _World]] = []
+    i = 0
+    n = len(ordered)
+    while i < n:
+        t_val = parse_time(ordered[i].time)
+        j = i
+        while j < n and ordered[j].time == ordered[i].time:
+            world.apply(ordered[j], t_val, on_wait=on_wait)
+            j += 1
+
+        snapshots.append((t_val, copy.deepcopy(world)))
+        i = j
+
+    for k in range(len(snapshots) - 1):
+        t_cur, snap = snapshots[k]
+        t_next, _ = snapshots[k + 1]
+        dur = t_next - t_cur
+        if dur <= 0:
+            continue
+
+        for r in snap.resource_names():
+            cap = snap.capacity_total(r)
+            if cap > 0:
+                alloc_weighted[r] = alloc_weighted.get(r, 0.0) + (snap.allocated_total(r) / cap) * dur
+                alloc_duration[r] = alloc_duration.get(r, 0.0) + dur
+
+        if _is_fragmentation_blocked(snap):
+            for r in snap.resource_names():
+                total_free = sum(snap.free_by_node(r).values())
+                unplaceable_sum[r] = unplaceable_sum.get(r, 0.0) + total_free * dur
+
+        counts = snap.running_pod_counts_by_node()
+        if counts:
+            cluster_std_weighted += _population_stdev(counts) * dur
+            cluster_std_duration += dur
+
+    allocation_rate = {r: alloc_weighted[r] / alloc_duration[r] for r in alloc_weighted if alloc_duration.get(r, 0.0) > 0}
+    cluster_std = cluster_std_weighted / cluster_std_duration if cluster_std_duration > 0 else 0.0
+    pending_count_at_end = sum(1 for status in world.instance_status.values() if status == "pending")
+    nonzero_wait_fraction = nonzero_wait_count / wait_count_total if wait_count_total > 0 else 0.0
+
     return Metrics(
-        pending_wait_by_class={},
-        pending_count_at_end=0,
-        allocation_rate={},
-        unplaceable_free={},
-        cluster_std=0.0,
-        nonzero_wait_fraction=0.0,
+        pending_wait_by_class=pending_wait_by_class,
+        pending_count_at_end=pending_count_at_end,
+        allocation_rate=allocation_rate,
+        unplaceable_free=unplaceable_sum,
+        cluster_std=cluster_std,
+        nonzero_wait_fraction=nonzero_wait_fraction,
     )
 
 

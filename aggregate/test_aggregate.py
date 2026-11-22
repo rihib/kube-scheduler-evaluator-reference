@@ -204,7 +204,7 @@ class RecordBuilder:
         self._write(time, "register_node", node_id, state="resource_capacity", after=capacity)
         return self
 
-    def create_task(self, time, task_id, instance_id, cpu="1", memory="1Gi", gpu="0") -> "RecordBuilder":
+    def create_task(self, time, task_id, instance_id, cpu="1", memory="0", gpu="0") -> "RecordBuilder":
         immutable = {
             "owner": "u1",
             "group": "g1",
