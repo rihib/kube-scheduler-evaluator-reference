@@ -84,6 +84,9 @@ func BuildInputVersion(
 		return nil, InputVersionSummary{}, fmt.Errorf("clusterdata: no node has any capacity; rho cannot be computed")
 	}
 	rhoBeforeScaling := rho(demand, capacity, periodBeforeScaling)
+	if len(used) > 0 && rhoBeforeScaling <= 0 {
+		return nil, InputVersionSummary{}, fmt.Errorf("clusterdata: rho is zero; the used pods request nothing or run for no time, so the submission intervals cannot be scaled to the target rho")
+	}
 
 	multiplier := rhoBeforeScaling / targetRho
 
