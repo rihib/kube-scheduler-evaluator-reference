@@ -880,7 +880,18 @@ def write_report(records: Sequence[RunRecord], writer, *, seed: int, distributed
     with ρ = 0.5's negative control and ρ = 1.1's prediction/result pairing
     (scenarios 5 and 6)."""
     sections = build_rho_sections(records, seed=seed, distributed_scheduler=distributed_scheduler)
-    lines = ["# 実験1 集計報告", ""]
+    lines = [
+        "# 実験1 集計報告",
+        "",
+        # round2 review, correctness IMO: unplaceable_free is a per-resource-max
+        # approximation (_is_fragmentation_blocked), not an exact "does any single
+        # node satisfy this request" check; it can under-count (never over-count)
+        # fragmentation spanning more than one resource at once.
+        "`unplaceable_free`（置けない空き資源の量）は、資源ごとの空きの最大値で判定する近似であり、"
+        "資源ごとには空きがあっても同じノードにまとまっていない場合の断片化を見落とすことがある"
+        "（実際より小さく出る方向にのみ外れる）。",
+        "",
+    ]
     for section in sections:
         lines.append(render_rho_markdown(section))
     writer.write_text("report.md", "\n".join(lines))
@@ -927,7 +938,11 @@ def run(
 
     try:
         texts = read_record_texts(Path(args.records_dir))
-    except Exception as e:
+    except OSError as e:
+        # Only a real I/O failure (round2 review, correctness IMO): a bug
+        # inside the adapter itself (TypeError, ...) propagates and crashes
+        # instead of being relabeled as "failed to read records" with no
+        # traceback.
         print(f"error: failed to read records from {args.records_dir}: {e}", file=sys.stderr)
         return 1
     if not texts:
@@ -938,7 +953,12 @@ def run(
     for path, text in texts:
         try:
             parsed.append(parse_record(text))
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            # Only parse_record's own documented failure modes — a malformed
+            # line, a missing field, a cut-off record it can't recover from
+            # (round2 review, correctness IMO). A bug inside parse_record
+            # itself propagates and crashes instead of being relabeled as
+            # "failed to parse <file>" with no traceback.
             print(f"error: failed to parse {path}: {e}", file=sys.stderr)
             return 1
 
