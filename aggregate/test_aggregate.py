@@ -169,6 +169,22 @@ def test_parse_record_raises_when_only_line_is_cut_mid_write() -> None:
 # --- read_record_texts_from_folder ---
 
 
+def test_parse_record_raises_when_the_header_line_is_not_a_json_object() -> None:
+    # round3 review, correctness IMO: a line that is valid JSON but not an
+    # object is a malformed record, which run() reports with the file's name.
+    # Without this check it crashed deeper in with a TypeError that run()'s
+    # narrowed except does not catch, so the reader never learned which file
+    # was bad.
+    with pytest.raises(ValueError, match="JSON object"):
+        aggregate.parse_record("123\n")
+
+
+def test_parse_record_raises_when_a_transition_line_is_not_a_json_object() -> None:
+    header = json.dumps(sample_header())
+    with pytest.raises(ValueError, match="JSON object"):
+        aggregate.parse_record(f"{header}\n[1, 2]\n")
+
+
 def test_read_record_texts_from_folder_reads_every_jsonl_file(tmp_path: Path) -> None:
     write_record_file(tmp_path / "run-a.jsonl", sample_header(scheduler={"profile": "LeastAllocated"}), [])
     write_record_file(tmp_path / "run-b.jsonl", sample_header(scheduler={"profile": "MostAllocated"}), [])
@@ -1479,6 +1495,23 @@ def test_run_fails_when_records_dir_has_corrupt_jsonl(tmp_path: Path) -> None:
     records_dir = tmp_path / "records"
     records_dir.mkdir()
     (records_dir / "broken.jsonl").write_text("{not valid json\n")
+    output_dir = tmp_path / "out"
+
+    code = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(output_dir)])
+
+    assert code == 1
+
+
+@pytest.mark.integration
+def test_run_fails_when_a_record_file_is_not_utf8(tmp_path: Path) -> None:
+    # round3 review, correctness IMO: a record file that is not valid UTF-8 is
+    # a corrupt record, an expected failure of reading. read_text raises
+    # UnicodeDecodeError, which is a ValueError and not an OSError, so the
+    # narrowed except missed it and the command died with a traceback that
+    # never named the file.
+    records_dir = tmp_path / "records"
+    records_dir.mkdir()
+    (records_dir / "binary.jsonl").write_bytes(b'{"evaluation_id": "\xff\xfe"}\n')
     output_dir = tmp_path / "out"
 
     code = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(output_dir)])
