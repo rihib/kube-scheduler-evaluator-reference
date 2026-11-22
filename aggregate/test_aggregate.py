@@ -355,3 +355,64 @@ def test_average_metrics_concatenates_wait_times_and_means_them_per_class() -> N
 
     assert avg.pending_wait_by_class == {"0": [1.0, 3.0, 5.0]}
     assert avg.mean_wait_by_class["0"] == pytest.approx(3.0)
+
+
+# --- build_rho_sections ---
+
+
+def make_run_record(scheduler_profile: str, rho: float, transitions, *, input_seed="seed-1", iteration=0) -> aggregate.RunRecord:
+    header = aggregate.RunHeader(
+        evaluation_id="eval-1",
+        scenario_id="scenario-1",
+        iteration=iteration,
+        trace_name="openb",
+        trace_version="v1",
+        reference_commit="abc",
+        input_seed=input_seed,
+        rho=rho,
+        evaluator_commit="def",
+        hardware="test-machine",
+        scheduler_profile=scheduler_profile,
+    )
+    return aggregate.RunRecord(header=header, transitions=transitions)
+
+
+def test_build_rho_sections_groups_by_rho_and_orders_least_allocated_first() -> None:
+    least = RecordBuilder()
+    least.create_task(0, "task-1", "instance-1", gpu="0")
+    least.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most = RecordBuilder()
+    most.create_task(0, "task-1", "instance-1", gpu="0")
+    most.bind(30, "task-1", "instance-1", "node-1", {"cpu": "1"})
+
+    records = [
+        make_run_record("MostAllocated", 1.1, most.transitions),
+        make_run_record("LeastAllocated", 1.1, least.transitions),
+    ]
+
+    sections = aggregate.build_rho_sections(records, rng=np.random.default_rng(0))
+
+    assert len(sections) == 1
+    section = sections[0]
+    assert section.rho == 1.1
+    assert section.scheduler_order == ("LeastAllocated", "MostAllocated")
+    # LeastAllocated's wait (10s) minus MostAllocated's wait (30s) is -20, a single
+    # version so the diff is shown raw, not as a bootstrap CI (decisions.md).
+    assert section.diffs["wait:0"].raw == pytest.approx(-20.0)
+    assert section.diffs["wait:0"].ci is None
+
+
+def test_build_rho_sections_separates_different_rho_values() -> None:
+    a = RecordBuilder()
+    a.create_task(0, "task-1", "instance-1")
+    b = RecordBuilder()
+    b.create_task(0, "task-1", "instance-1")
+
+    records = [
+        make_run_record("LeastAllocated", 0.5, a.transitions),
+        make_run_record("LeastAllocated", 1.1, b.transitions),
+    ]
+
+    sections = aggregate.build_rho_sections(records, rng=np.random.default_rng(0))
+
+    assert sorted(s.rho for s in sections) == [0.5, 1.1]
