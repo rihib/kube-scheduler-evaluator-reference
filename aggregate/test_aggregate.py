@@ -416,3 +416,87 @@ def test_build_rho_sections_separates_different_rho_values() -> None:
     sections = aggregate.build_rho_sections(records, rng=np.random.default_rng(0))
 
     assert sorted(s.rho for s in sections) == [0.5, 1.1]
+
+
+# --- render_rho_markdown ---
+
+
+def _two_scheduler_section(rho: float) -> aggregate.RhoSection:
+    least = RecordBuilder()
+    least.create_task(0, "task-1", "instance-1", gpu="8")
+    least.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most = RecordBuilder()
+    most.create_task(0, "task-1", "instance-1", gpu="8")
+    most.bind(2, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    records = [
+        make_run_record("LeastAllocated", rho, least.transitions),
+        make_run_record("MostAllocated", rho, most.transitions),
+    ]
+    return aggregate.build_rho_sections(records, rng=np.random.default_rng(0))[0]
+
+
+def test_render_rho_markdown_includes_run_table_and_diffs() -> None:
+    section = _two_scheduler_section(0.8)
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert "ρ = 0.8" in md
+    assert "LeastAllocated" in md
+    assert "MostAllocated" in md
+    assert "wait:8" in md
+
+
+def test_render_rho_markdown_rho_0_5_includes_negative_control() -> None:
+    section = _two_scheduler_section(0.5)
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert "陰性対照" in md
+    assert "待機時間が0でない" in md
+
+
+def test_render_rho_markdown_rho_1_1_includes_prediction_and_result() -> None:
+    section = _two_scheduler_section(1.1)
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert "予測" in md
+    assert "結果" in md
+    # LeastAllocated waited 10s, MostAllocated waited 2s: LeastAllocated is bigger,
+    # so the prediction (units/U04.md, experiment.md 3.1) held.
+    assert "当たった" in md
+
+
+# --- write_report ---
+
+
+class FakeReportWriter:
+    def __init__(self) -> None:
+        self.texts: dict[str, str] = {}
+        self.figures: dict[str, object] = {}
+
+    def write_text(self, relpath: str, content: str) -> None:
+        self.texts[relpath] = content
+
+    def write_figure(self, relpath: str, fig) -> None:
+        self.figures[relpath] = fig
+
+
+def test_write_report_writes_markdown_and_one_figure_per_rho() -> None:
+    least = RecordBuilder()
+    least.create_task(0, "task-1", "instance-1")
+    least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most = RecordBuilder()
+    most.create_task(0, "task-1", "instance-1")
+    most.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    records = [
+        make_run_record("LeastAllocated", 0.5, least.transitions),
+        make_run_record("MostAllocated", 0.5, most.transitions),
+    ]
+    writer = FakeReportWriter()
+
+    aggregate.write_report(records, writer, rng=np.random.default_rng(0))
+
+    assert "report.md" in writer.texts
+    assert "ρ = 0.5" in writer.texts["report.md"]
+    assert len(writer.figures) == 1
