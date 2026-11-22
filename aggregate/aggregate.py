@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 # Operation and mutable-state names, mirroring kube-scheduler-evaluator's
 # internal/record/record.go so this module reads the same vocabulary it writes.
 OpCreateTask = "create_task"
@@ -333,7 +335,12 @@ def bootstrap_diff(diffs: list[float], rng, resamples: int = 10000) -> DiffResul
     is one version, otherwise a bootstrap 95% CI. rng is injected (decisions.md)
     so the same seed always yields the same CI.
     """
-    return DiffResult(raw=None, ci=None)
+    if len(diffs) == 1:
+        return DiffResult(raw=diffs[0], ci=None)
+    diffs_arr = np.asarray(diffs, dtype=float)
+    resampled_means = rng.choice(diffs_arr, size=(resamples, len(diffs_arr)), replace=True).mean(axis=1)
+    low, high = np.percentile(resampled_means, [2.5, 97.5])
+    return DiffResult(raw=None, ci=(float(low), float(high)))
 
 
 def read_record_file(path: Path) -> RunRecord:
