@@ -381,6 +381,78 @@ def average_metrics(iterations: list[Metrics]) -> VersionAverage:
     )
 
 
+@dataclass(frozen=True)
+class _VersionKey:
+    trace_name: str
+    trace_version: str
+    input_seed: str
+
+
+def _version_key(h: RunHeader) -> _VersionKey:
+    return _VersionKey(h.trace_name, h.trace_version, h.input_seed)
+
+
+@dataclass(frozen=True)
+class RhoSection:
+    """One ρ's worth of runs, grouped for display and diffing (units/U04.md)."""
+
+    rho: float
+    runs: list[tuple[RunRecord, Metrics]]
+    # The two scheduler profiles found at this ρ, in diff order (a - b). LeastAllocated
+    # sorts first when present, so experiment.md 3.1's prediction direction matches the
+    # diffs' sign. None when this ρ does not have exactly two scheduler profiles.
+    scheduler_order: tuple[str, str] | None
+    diffs: dict[str, DiffResult]
+
+
+def _scalar_pairs(a: VersionAverage, b: VersionAverage):
+    yield "pending_count_at_end", a.pending_count_at_end, b.pending_count_at_end
+    yield "cluster_std", a.cluster_std, b.cluster_std
+    yield "nonzero_wait_fraction", a.nonzero_wait_fraction, b.nonzero_wait_fraction
+    for r in sorted(set(a.allocation_rate) | set(b.allocation_rate)):
+        yield f"allocation_rate:{r}", a.allocation_rate.get(r, 0.0), b.allocation_rate.get(r, 0.0)
+    for r in sorted(set(a.unplaceable_free) | set(b.unplaceable_free)):
+        yield f"unplaceable_free:{r}", a.unplaceable_free.get(r, 0.0), b.unplaceable_free.get(r, 0.0)
+    for c in sorted(set(a.mean_wait_by_class) | set(b.mean_wait_by_class)):
+        yield f"wait:{c}", a.mean_wait_by_class.get(c, 0.0), b.mean_wait_by_class.get(c, 0.0)
+
+
+def _diffs_for_group(group: list[tuple[RunRecord, Metrics]], a: str, b: str, rng) -> dict[str, DiffResult]:
+    by_version: dict[_VersionKey, dict[str, list[Metrics]]] = {}
+    for record, metrics in group:
+        vk = _version_key(record.header)
+        by_version.setdefault(vk, {}).setdefault(record.header.scheduler_profile, []).append(metrics)
+
+    per_metric_diffs: dict[str, list[float]] = {}
+    for by_scheduler in by_version.values():
+        if a not in by_scheduler or b not in by_scheduler:
+            continue
+        avg_a = average_metrics(by_scheduler[a])
+        avg_b = average_metrics(by_scheduler[b])
+        for key, va, vb in _scalar_pairs(avg_a, avg_b):
+            per_metric_diffs.setdefault(key, []).append(va - vb)
+
+    return {key: bootstrap_diff(diffs, rng=rng) for key, diffs in per_metric_diffs.items()}
+
+
+def build_rho_sections(records: list[RunRecord], rng) -> list[RhoSection]:
+    """Groups records by ρ and, within each ρ, computes the diff between its two
+    scheduler profiles across input versions (decisions.md)."""
+    runs = [(r, compute_metrics(r.transitions)) for r in records]
+    by_rho: dict[float, list[tuple[RunRecord, Metrics]]] = {}
+    for run in runs:
+        by_rho.setdefault(run[0].header.rho, []).append(run)
+
+    sections = []
+    for rho in sorted(by_rho):
+        group = by_rho[rho]
+        schedulers = sorted({r.header.scheduler_profile for r, _ in group}, key=lambda s: (s != "LeastAllocated", s))
+        scheduler_order = (schedulers[0], schedulers[1]) if len(schedulers) == 2 else None
+        diffs = _diffs_for_group(group, *scheduler_order, rng) if scheduler_order else {}
+        sections.append(RhoSection(rho=rho, runs=group, scheduler_order=scheduler_order, diffs=diffs))
+    return sections
+
+
 def read_record_file(path: Path) -> RunRecord:
     """Reads one run's JSONL record file (header line + transition lines)."""
     with path.open() as f:
