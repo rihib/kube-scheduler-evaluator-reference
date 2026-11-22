@@ -525,6 +525,22 @@ func TestBuildInputVersion_ErrorsOnZeroSubmissionPeriod(t *testing.T) {
 	}
 }
 
+// 使う Pod があるのに要求量×実行時間の合計がどの資源でも0だと、ρ が
+// 根拠無く0になり、倍率0で投入の間隔がすべて0の入力の版が目標の ρ を
+// 満たしたように見えてしまう。これはエラーで返す。
+func TestBuildInputVersion_ErrorsOnZeroDemand(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	// deletion_time と scheduled_time が同じなので、どの Pod も実行時間0。
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,10,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,60,60\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a zero total demand")
+	}
+}
+
 // sampleRatio=0 は使う Pod が0件になる境界だが、これは「負荷のない入力」
 // として正当なのでエラーにはせず、件数とρがすべて0になる。
 func TestBuildInputVersion_SampleRatioZeroUsesNoPods(t *testing.T) {
