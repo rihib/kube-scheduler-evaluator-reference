@@ -57,6 +57,40 @@ class RunRecord:
     transitions: list[Transition]
 
 
+@dataclass(frozen=True)
+class Metrics:
+    """One run's experiment 1 metrics (units/U04.md Implementation Decisions)."""
+
+    # GPU request class ("0", "1", "2-4", "8") -> list of pending-state dwell times in
+    # seconds, for instances that left pending via assign_node within the observation.
+    pending_wait_by_class: dict[str, list[float]]
+    # Instances still in the pending state at the end of the observation period.
+    pending_count_at_end: int
+    # Resource name -> time-weighted average of (allocated / capacity) over active nodes.
+    allocation_rate: dict[str, float]
+    # Resource name -> time integral (resource-seconds) of the cluster's free amount of
+    # that resource during intervals where a pending task's request fits the cluster's
+    # aggregate free resources but fits no single node (experiment.md 3.4).
+    unplaceable_free: dict[str, float]
+    # Time-weighted average of the population standard deviation of running-pod counts
+    # across registered nodes (RBRA's Cluster_std, experiment.md 3.4 last row).
+    cluster_std: float
+    # Fraction of instances with wait data whose pending dwell time was nonzero.
+    nonzero_wait_fraction: float
+
+
+def compute_metrics(transitions: list[Transition]) -> Metrics:
+    """Computes one run's experiment 1 metrics from its transition record."""
+    return Metrics(
+        pending_wait_by_class={},
+        pending_count_at_end=0,
+        allocation_rate={},
+        unplaceable_free={},
+        cluster_std=0.0,
+        nonzero_wait_fraction=0.0,
+    )
+
+
 def read_record_file(path: Path) -> RunRecord:
     """Reads one run's JSONL record file (header line + transition lines)."""
     with path.open() as f:

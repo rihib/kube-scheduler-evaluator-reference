@@ -167,3 +167,115 @@ def test_parse_time_same_instant_is_equal() -> None:
     a = aggregate.parse_time("2024-01-01T00:00:00.000000000Z")
     b = aggregate.parse_time("2024-01-01T00:00:00.000000000Z")
     assert a == b
+
+
+# --- compute_metrics ---
+
+
+class RecordBuilder:
+    """Builds a transition list with the same shape record.go's Manager writes,
+    so metrics tests exercise compute_metrics the way a real record would."""
+
+    def __init__(self) -> None:
+        self._seq = 0
+        self.transitions: list[aggregate.Transition] = []
+
+    def _next_seq(self) -> int:
+        self._seq += 1
+        return self._seq
+
+    def _write(self, time, op, component_id, task_id="", state="", state_key="", before=None, after=None, task_immutable=None):
+        self.transitions.append(
+            aggregate.Transition(
+                time=f"2024-01-01T00:00:{time:02d}.000000000Z",
+                seq=self._next_seq(),
+                operation=op,
+                component_id=component_id,
+                task_id=task_id or None,
+                state=state,
+                state_key=state_key or None,
+                before=before,
+                after=after,
+                task_immutable=task_immutable,
+            )
+        )
+
+    def register_node(self, time, node_id, capacity: dict[str, str]) -> "RecordBuilder":
+        self._write(time, "register_node", node_id, state="resource_capacity", after=capacity)
+        return self
+
+    def create_task(self, time, task_id, instance_id, cpu="1", memory="1Gi", gpu="0") -> "RecordBuilder":
+        immutable = {
+            "owner": "u1",
+            "group": "g1",
+            "job_id": task_id,
+            "resource_request": {"cpu": cpu, "memory": memory, "nvidia.com/gpu": gpu},
+            "resource_limit": {"cpu": cpu, "memory": memory, "nvidia.com/gpu": gpu},
+            "priority": 0,
+        }
+        self._write(time, "create_task", instance_id, task_id=task_id, state="instance_status", after="pending", task_immutable=immutable)
+        self._write(time, "create_task", instance_id, task_id=task_id, state="assigned_node", after=None)
+        return self
+
+    def bind(self, time, task_id, instance_id, node_id, allocated: dict[str, str]) -> "RecordBuilder":
+        self._write(time, "assign_node", instance_id, task_id=task_id, state="assigned_node", after=node_id)
+        self._write(time, "assign_node", node_id, task_id=task_id, state="allocated_resource", state_key=instance_id, after=allocated)
+        self._write(time, "start", instance_id, task_id=task_id, state="instance_status", before="pending", after="running")
+        return self
+
+
+def test_compute_metrics_pending_wait_by_gpu_class_and_count_at_end() -> None:
+    b = RecordBuilder()
+    b.create_task(0, "task-1", "instance-1", gpu="0")
+    b.create_task(0, "task-2", "instance-2", gpu="1")
+    b.create_task(2, "task-3", "instance-3", gpu="3")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    b.bind(12, "task-3", "instance-3", "node-1", {"cpu": "1"})
+    b.bind(15, "task-2", "instance-2", "node-1", {"cpu": "1"})
+    b.create_task(20, "task-4", "instance-4", gpu="0")  # stays pending
+    b.create_task(20, "task-5", "instance-5", gpu="0")
+    b.bind(20, "task-5", "instance-5", "node-1", {"cpu": "1"})  # wait == 0
+
+    metrics = aggregate.compute_metrics(b.transitions)
+
+    assert metrics.pending_wait_by_class == {
+        "0": [5.0, 0.0],
+        "1": [15.0],
+        "2-4": [10.0],
+    }
+    assert metrics.pending_count_at_end == 1
+    assert metrics.nonzero_wait_fraction == pytest.approx(3 / 4)
+
+
+def test_compute_metrics_allocation_rate_and_unplaceable_free() -> None:
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "10"})
+    b.create_task(0, "task-a", "instance-a", cpu="4")
+    b.bind(10, "task-a", "instance-a", "node-1", {"cpu": "4"})
+    b.create_task(20, "task-b", "instance-b", cpu="5")
+    b.bind(25, "task-b", "instance-b", "node-1", {"cpu": "5"})
+    b.create_task(30, "task-c", "instance-c", cpu="2")
+    b.register_node(40, "node-2", {"cpu": "1"})
+    b.create_task(50, "task-d", "instance-d", cpu="0")  # marks the end of observation
+
+    metrics = aggregate.compute_metrics(b.transitions)
+
+    assert metrics.allocation_rate["cpu"] == pytest.approx(0.553636364, rel=1e-6)
+    assert metrics.unplaceable_free["cpu"] == pytest.approx(20.0)
+
+
+def test_compute_metrics_cluster_std_is_time_weighted() -> None:
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "10"})
+    b.register_node(0, "node-2", {"cpu": "10"})
+    b.create_task(0, "task-1", "instance-1", cpu="1")
+    b.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    b.create_task(10, "task-2", "instance-2", cpu="1")
+    b.bind(20, "task-2", "instance-2", "node-1", {"cpu": "1"})
+    b.create_task(20, "task-3", "instance-3", cpu="1")
+    b.bind(30, "task-3", "instance-3", "node-2", {"cpu": "1"})
+    b.create_task(40, "task-4", "instance-4", cpu="0")  # marks the end of observation
+
+    metrics = aggregate.compute_metrics(b.transitions)
+
+    assert metrics.cluster_std == pytest.approx(0.5)
