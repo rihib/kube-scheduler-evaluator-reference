@@ -425,6 +425,28 @@ def test_compute_metrics_reflects_delete_and_release() -> None:
     assert metrics.allocation_rate["cpu"] == pytest.approx(0.2)
 
 
+def test_compute_metrics_unplaceable_free_misses_fragmentation_across_different_resources() -> None:
+    # round2 review, test IMO (aggregate.py:267-291): _is_fragmentation_blocked
+    # checks each requested resource's own per-node max independently. node-1
+    # has free cpu but no free gpu, node-2 has free gpu but no free cpu, so no
+    # single node can satisfy a task needing both at once (real fragmentation),
+    # yet each resource's own max individually looks sufficient. The docstring
+    # says this under-detects rather than over-detects, and no existing test
+    # exercised a request spanning more than one resource to show that.
+    b = RecordBuilder()
+    b.register_node(0, "node-1", {"cpu": "10", "nvidia.com/gpu": "0"})
+    b.register_node(0, "node-2", {"cpu": "0", "nvidia.com/gpu": "4"})
+    b.create_task(5, "task-1", "instance-1", cpu="1", gpu="1")
+    b.create_task(10, "task-2", "instance-2", cpu="0")  # marks the end of observation
+
+    metrics = aggregate.compute_metrics(b.transitions)
+
+    # Never falsely reports fragmentation where there is none; this real
+    # fragmentation case is a documented false negative, not a crash or a
+    # wrong-direction answer.
+    assert metrics.unplaceable_free == {}
+
+
 # --- DiffResult ---
 
 
@@ -514,6 +536,50 @@ def test_average_metrics_averages_scalars_across_iterations() -> None:
     assert avg.nonzero_wait_fraction == pytest.approx(0.75)
     assert avg.allocation_rate["cpu"] == pytest.approx(0.5)
     assert avg.unplaceable_free["cpu"] == pytest.approx(20.0)
+
+
+def test_average_metrics_averages_cluster_std_skipping_iterations_with_no_data() -> None:
+    # round2 review, test IMO: _mean_optional's "some None, some present" branch
+    # (the case this fix mainly protects — an iteration with no registered-node
+    # interval mixed with one that has data) was never exercised.
+    iterations = [_metrics(cluster_std=None), _metrics(cluster_std=1.0)]
+
+    avg = aggregate.average_metrics(iterations)
+
+    assert avg.cluster_std == pytest.approx(1.0)
+
+
+def test_average_metrics_averages_a_resource_only_over_iterations_that_measured_it() -> None:
+    # round2 review, correctness Must (aggregate.py:514-519): allocation_rate
+    # and unplaceable_free must not default a missing resource to 0.0 when
+    # averaging across iterations — an iteration whose record never saw "cpu"
+    # (e.g. no transitions at all) must be excluded from cpu's average, not
+    # folded in as a measured 0.
+    iterations = [
+        _metrics(allocation_rate={"cpu": 0.4}, unplaceable_free={"cpu": 10.0}),
+        _metrics(allocation_rate={}, unplaceable_free={}),  # never measured cpu
+    ]
+
+    avg = aggregate.average_metrics(iterations)
+
+    assert avg.allocation_rate["cpu"] == pytest.approx(0.4)
+    assert avg.unplaceable_free["cpu"] == pytest.approx(10.0)
+
+
+def test_mean_optional_skips_none_values() -> None:
+    assert aggregate._mean_optional([None, 2.0, None, 4.0]) == pytest.approx(3.0)
+
+
+def test_mean_optional_returns_none_when_every_value_is_none() -> None:
+    assert aggregate._mean_optional([None, None]) is None
+
+
+def test_format_optional_renders_n_a_for_none() -> None:
+    assert aggregate._format_optional(None) == "n/a"
+
+
+def test_format_optional_renders_a_measured_value() -> None:
+    assert aggregate._format_optional(0.0) == "0.0000"
 
 
 def test_average_metrics_concatenates_wait_times_and_means_them_per_class() -> None:
@@ -671,6 +737,73 @@ def test_build_rho_sections_uses_the_given_distributed_scheduler() -> None:
     assert section.distributed_scheduler == "Tetris"
 
 
+def test_build_rho_sections_excludes_a_metric_one_scheduler_never_measured_from_the_diff() -> None:
+    # round2 review, correctness Must: a wait-time class one scheduler's run
+    # never produced (it never requested that many GPUs) must not be diffed
+    # against a silent default of 0 — that misrepresents "never measured" as
+    # "measured and zero".
+    least = RecordBuilder()
+    least.create_task(0, "task-1", "instance-1", gpu="1")
+    least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most = RecordBuilder()
+    most.create_task(0, "task-1", "instance-1", gpu="0")  # never requests a GPU
+
+    records = [
+        make_run_record("LeastAllocated", 0.8, least.transitions),
+        make_run_record("MostAllocated", 0.8, most.transitions),
+    ]
+
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    assert "wait:1" not in section.diffs  # MostAllocated never measured a "1" GPU-class wait
+
+
+def test_build_rho_sections_does_not_treat_a_transitionless_record_as_measuring_zero() -> None:
+    # round2 review, correctness Must: a record whose write was interrupted
+    # right after the header (parses as complete, but has zero transitions,
+    # per units/U04.md "着手時に決めること") must not silently count as having
+    # measured 0 for metrics it never had a chance to produce — mixing in such
+    # a record skewed scenarios 4-6's diffs (confirmed: wait:1's diff came out
+    # as 4.0000 before this fix).
+    least = RecordBuilder()
+    least.create_task(0, "task-1", "instance-1", gpu="1")
+    least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_crashed = RecordBuilder()  # no transitions at all
+
+    records = [
+        make_run_record("LeastAllocated", 0.8, least.transitions),
+        make_run_record("MostAllocated", 0.8, most_crashed.transitions),
+    ]
+
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    assert "wait:1" not in section.diffs
+
+
+def test_build_rho_sections_leaves_diffs_empty_when_no_version_has_both_schedulers() -> None:
+    # round2 review, correctness Must: two profiles can be found at a ρ overall
+    # while never coexisting within the same input version (e.g. each version
+    # only ran one of the two schedulers so far), so no version contributes a
+    # diff and build_rho_sections legitimately returns an empty diffs dict even
+    # though scheduler_order has exactly two entries.
+    least_only = RecordBuilder()
+    least_only.create_task(0, "task-1", "instance-1")
+    least_only.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_only = RecordBuilder()
+    most_only.create_task(0, "task-1", "instance-1")
+    most_only.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+
+    records = [
+        make_run_record("LeastAllocated", 0.8, least_only.transitions, input_seed="seed-1"),
+        make_run_record("MostAllocated", 0.8, most_only.transitions, input_seed="seed-2"),
+    ]
+
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    assert section.scheduler_order == ("LeastAllocated", "MostAllocated")
+    assert section.diffs == {}
+
+
 # --- render_rho_markdown ---
 
 
@@ -736,6 +869,32 @@ def test_render_rho_markdown_per_run_table_includes_allocation_rate_and_unplacea
     assert "unplaceable_free:cpu" in md
 
 
+def test_render_rho_markdown_per_run_table_shows_n_a_for_a_resource_this_run_never_measured() -> None:
+    # round2 review, correctness IMO (round1 leftover, aggregate.py:688-689):
+    # allocation_rate/unplaceable_free showed a measured 0.0000 for a resource
+    # this particular run's record never had a node registering, instead of
+    # "n/a" like cluster_std already does — indistinguishable from an actually
+    # measured 0.
+    with_cpu = RecordBuilder()
+    with_cpu.register_node(0, "node-1", {"cpu": "10"})
+    with_cpu.create_task(0, "task-1", "instance-1", cpu="1")
+    with_cpu.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    without_cpu_node = RecordBuilder()  # never registers a cpu-capable node
+    without_cpu_node.register_node(0, "node-2", {"nvidia.com/gpu": "4"})
+    without_cpu_node.create_task(0, "task-2", "instance-2", cpu="0", gpu="1")
+    without_cpu_node.bind(5, "task-2", "instance-2", "node-2", {"nvidia.com/gpu": "1"})
+    records = [
+        make_run_record("LeastAllocated", 0.8, with_cpu.transitions),
+        make_run_record("MostAllocated", 0.8, without_cpu_node.transitions),
+    ]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    most_row = next(line for line in md.splitlines() if line.startswith("| MostAllocated |"))
+    assert "n/a" in most_row  # MostAllocated's record never registered a cpu resource
+
+
 def test_render_rho_markdown_links_to_the_figure_for_this_rho() -> None:
     section = _two_scheduler_section(0.8)
 
@@ -795,6 +954,54 @@ def test_render_rho_markdown_shows_a_reason_when_there_are_not_exactly_two_sched
     assert section.scheduler_order is None
     assert "LeastAllocated" in md  # the one profile that was found is named
     assert "1 個のスケジューラ" in md
+
+
+def test_render_rho_markdown_shows_a_reason_when_no_version_has_both_schedulers() -> None:
+    # round2 review, correctness Must: diffs can be empty even when exactly two
+    # profiles were found at this ρ, if they never coexist within the same
+    # input version (see test_build_rho_sections_leaves_diffs_empty_when_no_
+    # version_has_both_schedulers). The diff table must say why instead of
+    # rendering a header with no rows.
+    least_only = RecordBuilder()
+    least_only.create_task(0, "task-1", "instance-1")
+    least_only.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_only = RecordBuilder()
+    most_only.create_task(0, "task-1", "instance-1")
+    most_only.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    records = [
+        make_run_record("LeastAllocated", 0.8, least_only.transitions, input_seed="seed-1"),
+        make_run_record("MostAllocated", 0.8, most_only.transitions, input_seed="seed-2"),
+    ]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    diff_section = md.split("### スケジューラの差")[1].split("### ")[0]
+    assert "| metric | diff |" not in diff_section
+    assert "そろわ" in diff_section
+
+
+def test_render_rho_markdown_rho_1_1_shows_a_reason_when_no_version_has_both_schedulers() -> None:
+    # round2 review, correctness Must: the same empty-diffs case as above, but
+    # for the ρ = 1.1 prediction/result section, which must not render an
+    # empty table either.
+    least_only = RecordBuilder()
+    least_only.create_task(0, "task-1", "instance-1")
+    least_only.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_only = RecordBuilder()
+    most_only.create_task(0, "task-1", "instance-1")
+    most_only.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    records = [
+        make_run_record("LeastAllocated", 1.1, least_only.transitions, input_seed="seed-1"),
+        make_run_record("MostAllocated", 1.1, most_only.transitions, input_seed="seed-2"),
+    ]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    prediction_section = md.split("### 予測と結果（高負荷）")[1]
+    assert "| metric |" not in prediction_section
+    assert "そろわ" in prediction_section
 
 
 def test_render_rho_markdown_rho_1_1_section_names_a_missing_distributed_scheduler() -> None:
@@ -885,6 +1092,22 @@ def test_write_report_writes_markdown_and_one_png_figure_per_rho() -> None:
     assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")  # the PNG magic number
 
 
+def test_write_report_notes_the_fragmentation_approximation() -> None:
+    # round2 review, correctness IMO (aggregate.py:267-289): unplaceable_free's
+    # per-resource-max approximation can miss real multi-resource
+    # fragmentation; the report must say so instead of presenting the number
+    # as an exact measurement.
+    b = RecordBuilder()
+    b.create_task(0, "task-1", "instance-1")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    records = [make_run_record("LeastAllocated", 0.8, b.transitions)]
+    writer = FakeReportWriter()
+
+    aggregate.write_report(records, writer, seed=0)
+
+    assert "近似" in writer.texts["report.md"]
+
+
 # --- run (the CLI entry) ---
 
 
@@ -906,8 +1129,12 @@ def test_run_reads_and_writes_via_injected_fakes() -> None:
 
 
 def test_run_fails_when_read_record_texts_raises() -> None:
+    # OSError (a real I/O failure, e.g. permission denied) is the error a
+    # read_record_texts adapter actually raises for "could not read the
+    # records" (round2 review, correctness IMO: the catch used to be
+    # `except Exception`, which also hid bugs inside the adapter itself).
     def failing_read(_):
-        raise ValueError("boom")
+        raise OSError("boom")
 
     code = aggregate.run(
         ["--records-dir", "unused", "--output-dir", "unused"],
@@ -916,6 +1143,41 @@ def test_run_fails_when_read_record_texts_raises() -> None:
     )
 
     assert code == 1
+
+
+def test_run_lets_a_non_os_error_from_read_record_texts_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # round2 review, correctness IMO (aggregate.py:880): a wide
+    # `except Exception` around reading records turned a bug inside
+    # read_record_texts into a misleading "failed to read records" message
+    # with no traceback. Only OSError is caught; anything else must crash
+    # visibly instead.
+    def buggy_read(_):
+        raise TypeError("not a real I/O failure")
+
+    with pytest.raises(TypeError):
+        aggregate.run(
+            ["--records-dir", "unused", "--output-dir", "unused"],
+            read_record_texts=buggy_read,
+            writer_factory=lambda _: FakeReportWriter(),
+        )
+
+
+def test_run_lets_a_non_parsing_error_from_parse_record_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # round2 review, correctness IMO (aggregate.py:891): same narrowing on the
+    # parse side — parse_record's own bugs (not a malformed-input
+    # ValueError/KeyError/JSONDecodeError) must crash visibly instead of being
+    # relabeled as "failed to parse <file>".
+    def buggy_parse(_text):
+        raise TypeError("not a parsing failure")
+
+    monkeypatch.setattr(aggregate, "parse_record", buggy_parse)
+
+    with pytest.raises(TypeError):
+        aggregate.run(
+            ["--records-dir", "unused", "--output-dir", "unused"],
+            read_record_texts=lambda _: [(Path("a.jsonl"), "irrelevant")],
+            writer_factory=lambda _: FakeReportWriter(),
+        )
 
 
 def test_run_fails_when_no_records_found() -> None:
