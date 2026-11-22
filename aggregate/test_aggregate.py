@@ -185,6 +185,18 @@ def test_parse_record_raises_when_a_transition_line_is_not_a_json_object() -> No
         aggregate.parse_record(f"{header}\n[1, 2]\n")
 
 
+@pytest.mark.parametrize("field", ["input", "execution", "scheduler"])
+def test_parse_record_raises_when_a_header_section_is_not_a_json_object(field: str) -> None:
+    # round4 review, correctness IMO: the header line being an object is not
+    # enough. Its sections are read one level deeper, so a record where one of
+    # them is a bare value crashed with a TypeError that run()'s except does
+    # not catch, losing the name of the file that was corrupt.
+    text = record_text(sample_header(**{field: "openb"}), [])
+
+    with pytest.raises(ValueError, match=f'header field "{field}" is not a JSON object'):
+        aggregate.parse_record(text)
+
+
 def test_read_record_texts_from_folder_reads_every_jsonl_file(tmp_path: Path) -> None:
     write_record_file(tmp_path / "run-a.jsonl", sample_header(scheduler={"profile": "LeastAllocated"}), [])
     write_record_file(tmp_path / "run-b.jsonl", sample_header(scheduler={"profile": "MostAllocated"}), [])
