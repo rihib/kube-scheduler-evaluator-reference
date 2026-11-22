@@ -152,3 +152,18 @@ def test_parse_quantity(value: str, expected: float) -> None:
 )
 def test_classify_gpu_class(gpu_count: int, expected_class: str) -> None:
     assert aggregate.classify_gpu_class(gpu_count) == expected_class
+
+
+# --- parse_time ---
+
+
+def test_parse_time_orders_chronologically() -> None:
+    a = aggregate.parse_time("2024-01-01T00:00:00.000000000Z")
+    b = aggregate.parse_time("2024-01-01T00:00:10.500000000Z")
+    assert b - a == pytest.approx(10.5)
+
+
+def test_parse_time_same_instant_is_equal() -> None:
+    a = aggregate.parse_time("2024-01-01T00:00:00.000000000Z")
+    b = aggregate.parse_time("2024-01-01T00:00:00.000000000Z")
+    assert a == b
