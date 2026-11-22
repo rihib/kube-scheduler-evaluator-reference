@@ -502,17 +502,36 @@ def _mean_optional(values: list[float | None]) -> float | None:
 
 
 def average_metrics(iterations: list[Metrics]) -> VersionAverage:
-    """Averages one (version, scheduler)'s per-iteration Metrics into a VersionAverage."""
+    """Averages one (version, scheduler)'s per-iteration Metrics into a VersionAverage.
+
+    A resource averages only over the iterations that actually measured it
+    (round2 review, correctness Must): an iteration whose record has no key
+    for a resource — because it registered no node with that resource, or
+    (units/U04.md "着手時に決めること") had zero transitions at all — is
+    excluded from that resource's average rather than folded in as a
+    measured 0, the same "not measured, not zero" treatment cluster_std and
+    nonzero_wait_fraction already get via _mean_optional.
+    """
     resources = {r for m in iterations for r in set(m.allocation_rate) | set(m.unplaceable_free)}
     pending_wait_by_class: dict[str, list[float]] = {}
     for m in iterations:
         for cls, waits in m.pending_wait_by_class.items():
             pending_wait_by_class.setdefault(cls, []).extend(waits)
 
+    allocation_rate = {}
+    unplaceable_free = {}
+    for r in resources:
+        avg_alloc = _mean_optional([m.allocation_rate.get(r) for m in iterations])
+        if avg_alloc is not None:
+            allocation_rate[r] = avg_alloc
+        avg_free = _mean_optional([m.unplaceable_free.get(r) for m in iterations])
+        if avg_free is not None:
+            unplaceable_free[r] = avg_free
+
     return VersionAverage(
         pending_count_at_end=_mean([m.pending_count_at_end for m in iterations]),
-        allocation_rate={r: _mean([m.allocation_rate.get(r, 0.0) for m in iterations]) for r in resources},
-        unplaceable_free={r: _mean([m.unplaceable_free.get(r, 0.0) for m in iterations]) for r in resources},
+        allocation_rate=allocation_rate,
+        unplaceable_free=unplaceable_free,
         cluster_std=_mean_optional([m.cluster_std for m in iterations]),
         nonzero_wait_fraction=_mean_optional([m.nonzero_wait_fraction for m in iterations]),
         pending_wait_by_class=pending_wait_by_class,
@@ -553,17 +572,28 @@ class RhoSection:
 
 
 def _scalar_pairs(a: VersionAverage, b: VersionAverage):
+    """Yields (metric key, a's value, b's value) for every metric both sides
+    actually measured.
+
+    Per-resource and per-class metrics use the intersection of a's and b's
+    keys, not the union with a 0.0 default (round2 review, correctness Must):
+    a key present on one side but absent on the other means that side never
+    measured it (e.g. its scheduler never requested that many GPUs, or its
+    record had zero transitions — units/U04.md "着手時に決めること"), which
+    must not be diffed against a default of 0 as if it had been measured and
+    was exactly zero.
+    """
     yield "pending_count_at_end", a.pending_count_at_end, b.pending_count_at_end
     if a.cluster_std is not None and b.cluster_std is not None:
         yield "cluster_std", a.cluster_std, b.cluster_std
     if a.nonzero_wait_fraction is not None and b.nonzero_wait_fraction is not None:
         yield "nonzero_wait_fraction", a.nonzero_wait_fraction, b.nonzero_wait_fraction
-    for r in sorted(set(a.allocation_rate) | set(b.allocation_rate)):
-        yield f"allocation_rate:{r}", a.allocation_rate.get(r, 0.0), b.allocation_rate.get(r, 0.0)
-    for r in sorted(set(a.unplaceable_free) | set(b.unplaceable_free)):
-        yield f"unplaceable_free:{r}", a.unplaceable_free.get(r, 0.0), b.unplaceable_free.get(r, 0.0)
-    for c in sorted(set(a.mean_wait_by_class) | set(b.mean_wait_by_class)):
-        yield f"wait:{c}", a.mean_wait_by_class.get(c, 0.0), b.mean_wait_by_class.get(c, 0.0)
+    for r in sorted(set(a.allocation_rate) & set(b.allocation_rate)):
+        yield f"allocation_rate:{r}", a.allocation_rate[r], b.allocation_rate[r]
+    for r in sorted(set(a.unplaceable_free) & set(b.unplaceable_free)):
+        yield f"unplaceable_free:{r}", a.unplaceable_free[r], b.unplaceable_free[r]
+    for c in sorted(set(a.mean_wait_by_class) & set(b.mean_wait_by_class)):
+        yield f"wait:{c}", a.mean_wait_by_class[c], b.mean_wait_by_class[c]
 
 
 def _diffs_for_group(group: list[tuple[RunRecord, Metrics]], a: str, b: str, seed: int) -> dict[str, DiffResult]:
@@ -685,8 +715,11 @@ def render_rho_markdown(section: RhoSection) -> str:
             _format_optional(metrics.cluster_std),
             _format_optional(metrics.nonzero_wait_fraction),
         ]
-        row += [f"{metrics.allocation_rate.get(r, 0.0):.4f}" for r in resources]
-        row += [f"{metrics.unplaceable_free.get(r, 0.0):.4f}" for r in resources]
+        # .get(r) (not .get(r, 0.0)): a resource this run's record never saw
+        # (no node registered with it) is "n/a", not a measured 0 (round2
+        # review, correctness IMO, round1 leftover).
+        row += [_format_optional(metrics.allocation_rate.get(r)) for r in resources]
+        row += [_format_optional(metrics.unplaceable_free.get(r)) for r in resources]
         lines.append("| " + " | ".join(row) + " |")
     lines.append("")
 
