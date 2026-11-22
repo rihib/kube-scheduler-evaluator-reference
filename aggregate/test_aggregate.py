@@ -310,3 +310,48 @@ def test_bootstrap_diff_same_seed_is_reproducible() -> None:
     second = aggregate.bootstrap_diff(diffs, rng=np.random.default_rng(42))
 
     assert first.ci == second.ci
+
+
+# --- average_metrics ---
+
+
+def _metrics(**overrides) -> aggregate.Metrics:
+    base = dict(
+        pending_wait_by_class={},
+        pending_count_at_end=0,
+        allocation_rate={},
+        unplaceable_free={},
+        cluster_std=0.0,
+        nonzero_wait_fraction=0.0,
+    )
+    base.update(overrides)
+    return aggregate.Metrics(**base)
+
+
+def test_average_metrics_averages_scalars_across_iterations() -> None:
+    iterations = [
+        _metrics(pending_count_at_end=2, cluster_std=1.0, nonzero_wait_fraction=0.5,
+                  allocation_rate={"cpu": 0.4}, unplaceable_free={"cpu": 10.0}),
+        _metrics(pending_count_at_end=4, cluster_std=3.0, nonzero_wait_fraction=1.0,
+                  allocation_rate={"cpu": 0.6}, unplaceable_free={"cpu": 30.0}),
+    ]
+
+    avg = aggregate.average_metrics(iterations)
+
+    assert avg.pending_count_at_end == pytest.approx(3.0)
+    assert avg.cluster_std == pytest.approx(2.0)
+    assert avg.nonzero_wait_fraction == pytest.approx(0.75)
+    assert avg.allocation_rate["cpu"] == pytest.approx(0.5)
+    assert avg.unplaceable_free["cpu"] == pytest.approx(20.0)
+
+
+def test_average_metrics_concatenates_wait_times_and_means_them_per_class() -> None:
+    iterations = [
+        _metrics(pending_wait_by_class={"0": [1.0, 3.0]}),
+        _metrics(pending_wait_by_class={"0": [5.0]}),
+    ]
+
+    avg = aggregate.average_metrics(iterations)
+
+    assert avg.pending_wait_by_class == {"0": [1.0, 3.0, 5.0]}
+    assert avg.mean_wait_by_class["0"] == pytest.approx(3.0)
