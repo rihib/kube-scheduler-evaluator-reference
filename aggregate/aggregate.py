@@ -19,6 +19,7 @@ import copy
 import json
 import re
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -76,6 +77,11 @@ class RunHeader:
 class RunRecord:
     header: RunHeader
     transitions: list[Transition]
+    # True when the file's last line was not valid JSON: the write was very likely
+    # interrupted mid-line (units/U04.md "着手時に決めること"). That line is dropped;
+    # callers should exclude a truncated record instead of treating its cut-off
+    # point as a genuine end of observation.
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -231,7 +237,7 @@ def _is_fragmentation_blocked(world: _World) -> bool:
     return False
 
 
-def compute_metrics(transitions: list[Transition]) -> Metrics:
+def compute_metrics(transitions: Sequence[Transition]) -> Metrics:
     """Computes one run's experiment 1 metrics from its transition record
     (units/U04.md Implementation Decisions, experiment.md 3.4)."""
     ordered = sorted(transitions, key=lambda t: (parse_time(t.time), t.seq))
@@ -330,16 +336,25 @@ class DiffResult:
     ci: tuple[float, float] | None
 
 
-def bootstrap_diff(diffs: list[float], rng, resamples: int = 10000) -> DiffResult:
+def bootstrap_diff(per_version_diffs: Sequence[float], *, seed: int, iterations: int = 10000) -> DiffResult:
     """Combines per-version diffs (scheduler A's metric minus scheduler B's, one
     value per input version) into the value to report: the diff itself when there
-    is one version, otherwise a bootstrap 95% CI. rng is injected (decisions.md)
-    so the same seed always yields the same CI.
+    is one version, otherwise a bootstrap 95% CI.
+
+    Takes a plain seed rather than an injected random number generator: a fresh
+    generator is built from it on every call, so this metric's CI depends only
+    on (per_version_diffs, seed) and not on how many other metrics were
+    bootstrapped first against a shared generator. That keeps this seam stable
+    across decisions.md's later step of scaling up the number of input versions
+    and iterations (rihib:interface-judge round 1, Must 1): adding a version
+    only changes the length of per_version_diffs, not this function's inputs'
+    shape, and no other metric's result shifts because of it.
     """
-    if len(diffs) == 1:
-        return DiffResult(raw=diffs[0], ci=None)
-    diffs_arr = np.asarray(diffs, dtype=float)
-    resampled_means = rng.choice(diffs_arr, size=(resamples, len(diffs_arr)), replace=True).mean(axis=1)
+    if len(per_version_diffs) == 1:
+        return DiffResult(raw=per_version_diffs[0], ci=None)
+    rng = np.random.default_rng(seed)
+    diffs_arr = np.asarray(per_version_diffs, dtype=float)
+    resampled_means = rng.choice(diffs_arr, size=(iterations, len(diffs_arr)), replace=True).mean(axis=1)
     low, high = np.percentile(resampled_means, [2.5, 97.5])
     return DiffResult(raw=None, ci=(float(low), float(high)))
 
@@ -418,7 +433,7 @@ def _scalar_pairs(a: VersionAverage, b: VersionAverage):
         yield f"wait:{c}", a.mean_wait_by_class.get(c, 0.0), b.mean_wait_by_class.get(c, 0.0)
 
 
-def _diffs_for_group(group: list[tuple[RunRecord, Metrics]], a: str, b: str, rng) -> dict[str, DiffResult]:
+def _diffs_for_group(group: list[tuple[RunRecord, Metrics]], a: str, b: str, seed: int) -> dict[str, DiffResult]:
     by_version: dict[_VersionKey, dict[str, list[Metrics]]] = {}
     for record, metrics in group:
         vk = _version_key(record.header)
@@ -433,10 +448,10 @@ def _diffs_for_group(group: list[tuple[RunRecord, Metrics]], a: str, b: str, rng
         for key, va, vb in _scalar_pairs(avg_a, avg_b):
             per_metric_diffs.setdefault(key, []).append(va - vb)
 
-    return {key: bootstrap_diff(diffs, rng=rng) for key, diffs in per_metric_diffs.items()}
+    return {key: bootstrap_diff(diffs, seed=seed) for key, diffs in per_metric_diffs.items()}
 
 
-def build_rho_sections(records: list[RunRecord], rng) -> list[RhoSection]:
+def build_rho_sections(records: Sequence[RunRecord], *, seed: int) -> list[RhoSection]:
     """Groups records by ρ and, within each ρ, computes the diff between its two
     scheduler profiles across input versions (decisions.md)."""
     runs = [(r, compute_metrics(r.transitions)) for r in records]
@@ -449,7 +464,7 @@ def build_rho_sections(records: list[RunRecord], rng) -> list[RhoSection]:
         group = by_rho[rho]
         schedulers = sorted({r.header.scheduler_profile for r, _ in group}, key=lambda s: (s != "LeastAllocated", s))
         scheduler_order = (schedulers[0], schedulers[1]) if len(schedulers) == 2 else None
-        diffs = _diffs_for_group(group, *scheduler_order, rng) if scheduler_order else {}
+        diffs = _diffs_for_group(group, *scheduler_order, seed) if scheduler_order else {}
         sections.append(RhoSection(rho=rho, runs=group, scheduler_order=scheduler_order, diffs=diffs))
     return sections
 
@@ -523,7 +538,7 @@ def render_rho_markdown(section: RhoSection) -> str:
             "待機時間と、置けない空き資源の量が大きい。"
         )
         lines.append("")
-        prediction_keys = sorted(k for k in section.diffs if k.startswith("wait:") or k.startswith("unplaceable_free:"))
+        prediction_keys = sorted(k for k in section.diffs if k.startswith(("wait:", "unplaceable_free:")))
         if prediction_keys:
             lines.append("| metric | diff（LeastAllocated − 他） | 予測が当たったか |")
             lines.append("| --- | --- | --- |")
@@ -536,9 +551,15 @@ def render_rho_markdown(section: RhoSection) -> str:
     return "\n".join(lines)
 
 
-def build_figures(sections: list[RhoSection]) -> list[tuple[str, object]]:
-    """Builds one boxplot figure per ρ, comparing the pending wait time
-    distribution by GPU class and scheduler (scenario 4)."""
+def build_figures(sections: list[RhoSection]) -> list[tuple[str, bytes]]:
+    """Builds one boxplot PNG per ρ, comparing the pending wait time
+    distribution by GPU class and scheduler (scenario 4). Rendering happens
+    here, in production code, and only the finished PNG bytes cross the writer
+    seam (rihib:interface-judge round 1, IMO): a test can check the bytes it
+    received actually are a PNG, instead of only checking that some Figure
+    object was passed through."""
+    import io
+
     import matplotlib
 
     matplotlib.use("Agg")
@@ -560,13 +581,19 @@ def build_figures(sections: list[RhoSection]) -> list[tuple[str, object]]:
         ax.set_title(f"pending wait time (ρ={section.rho})")
         ax.set_ylabel("seconds")
         fig.tight_layout()
-        figures.append((f"figures/rho-{section.rho}-wait.png", fig))
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        figures.append((f"figures/rho-{section.rho}-wait.png", buf.getvalue()))
     return figures
 
 
 class FileReportWriter:
     """The real report-writing adapter (decisions.md): writes to files under
-    output_dir."""
+    output_dir. A thin port (write_text / write_bytes only): it has no idea
+    what a figure is, so it cannot be satisfied by just recording that
+    write_figure(fig) was called with something."""
 
     def __init__(self, output_dir: Path) -> None:
         self.output_dir = Path(output_dir)
@@ -576,26 +603,23 @@ class FileReportWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    def write_figure(self, relpath: str, fig) -> None:
+    def write_bytes(self, relpath: str, content: bytes) -> None:
         path = self.output_dir / relpath
         path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(path)
-        import matplotlib.pyplot as plt
-
-        plt.close(fig)
+        path.write_bytes(content)
 
 
-def write_report(records: list[RunRecord], writer, rng) -> None:
+def write_report(records: Sequence[RunRecord], writer, *, seed: int) -> None:
     """Builds and writes experiment 1's report (scenario 4): one section per ρ,
     with ρ = 0.5's negative control and ρ = 1.1's prediction/result pairing
     (scenarios 5 and 6)."""
-    sections = build_rho_sections(records, rng)
+    sections = build_rho_sections(records, seed=seed)
     lines = ["# 実験1 集計報告", ""]
     for section in sections:
         lines.append(render_rho_markdown(section))
     writer.write_text("report.md", "\n".join(lines))
-    for relpath, fig in build_figures(sections):
-        writer.write_figure(relpath, fig)
+    for relpath, png_bytes in build_figures(sections):
+        writer.write_bytes(relpath, png_bytes)
 
 
 def _parse_args(argv: list[str]):
@@ -608,28 +632,52 @@ def _parse_args(argv: list[str]):
     return parser.parse_args(argv)
 
 
-def run(argv: list[str], *, read_records=None, writer_factory=FileReportWriter) -> int:
+def run(
+    argv: list[str],
+    *,
+    read_record_texts: Callable[[Path], Sequence[str]] | None = None,
+    writer_factory: Callable[[Path], object] = FileReportWriter,
+) -> int:
     """The report command (units/U04.md): reads every record under --records-dir
-    and writes the report under --output-dir. read_records and writer_factory are
-    injected (decisions.md) so tests can pass Fakes; the defaults are the real
-    file-based adapters."""
-    if read_records is None:
-        read_records = read_records_from_folder
+    and writes the report under --output-dir.
+
+    read_record_texts and writer_factory are injected (decisions.md) so tests
+    can pass Fakes; the defaults are the real file-based adapters.
+    read_record_texts is deliberately thin — it only returns each file's raw
+    text — because parsing (parse_record) is this module's own logic and
+    always runs for real, never behind a Fake (rihib:interface-judge round 1,
+    Must 2).
+    """
+    if read_record_texts is None:
+        read_record_texts = read_record_texts_from_folder
     args = _parse_args(argv)
 
     try:
-        records = read_records(Path(args.records_dir))
+        texts = read_record_texts(Path(args.records_dir))
     except Exception as e:
         print(f"error: failed to read records from {args.records_dir}: {e}", file=sys.stderr)
         return 1
-    if not records:
+    if not texts:
         print(f"error: no records found in {args.records_dir}", file=sys.stderr)
         return 1
 
-    rng = np.random.default_rng(args.seed)
+    try:
+        parsed = [parse_record(text) for text in texts]
+    except Exception as e:
+        print(f"error: failed to parse a record under {args.records_dir}: {e}", file=sys.stderr)
+        return 1
+
+    records = [r for r in parsed if not r.truncated]
+    truncated_count = len(parsed) - len(records)
+    if truncated_count:
+        print(f"warning: skipped {truncated_count} truncated record(s) under {args.records_dir}", file=sys.stderr)
+    if not records:
+        print(f"error: no complete records to aggregate under {args.records_dir}", file=sys.stderr)
+        return 1
+
     writer = writer_factory(Path(args.output_dir))
     try:
-        write_report(records, writer, rng)
+        write_report(records, writer, seed=args.seed)
     except Exception as e:
         print(f"error: failed to write report to {args.output_dir}: {e}", file=sys.stderr)
         return 1
@@ -640,12 +688,36 @@ def main() -> None:
     sys.exit(run(sys.argv[1:]))
 
 
-def read_record_file(path: Path) -> RunRecord:
-    """Reads one run's JSONL record file (header line + transition lines)."""
-    with path.open() as f:
-        lines = [json.loads(line) for line in f if line.strip()]
-    if not lines:
-        raise ValueError(f"{path}: record file is empty, missing its header line")
+def parse_record(text: str) -> RunRecord:
+    """Parses one run's raw JSONL record text (header line + transition lines)
+    into a RunRecord. This is the pure parsing step (module 4's side, per
+    rihib:interface-judge's review): it always runs for real, never behind a
+    Fake, so every parsing edge case — missing fields, an unknown operation
+    name, a cut-off last line — gets real unit test coverage.
+
+    If the last non-empty line is not valid JSON, the write was very likely
+    interrupted mid-line (units/U04.md "着手時に決めること": a short-but-complete
+    run and a run cut off mid-write look identical once the cut lands exactly on
+    a line boundary, but a cut mid-line is detectable). That line is dropped and
+    the record comes back with truncated=True. Any other malformed line is a
+    hard error: it is not explained by a mid-write cut, so it is a genuine
+    parsing failure the caller should not silently paper over.
+    """
+    raw_lines = [line for line in text.splitlines() if line.strip()]
+    if not raw_lines:
+        raise ValueError("record is empty, missing its header line")
+
+    truncated = False
+    try:
+        json.loads(raw_lines[-1])
+    except json.JSONDecodeError:
+        truncated = True
+        raw_lines = raw_lines[:-1]
+
+    if not raw_lines:
+        raise ValueError("record is empty after dropping its truncated last line")
+
+    lines = [json.loads(line) for line in raw_lines]
 
     h = lines[0]
     header = RunHeader(
@@ -677,12 +749,15 @@ def read_record_file(path: Path) -> RunRecord:
         )
         for t in lines[1:]
     ]
-    return RunRecord(header=header, transitions=transitions)
+    return RunRecord(header=header, transitions=transitions, truncated=truncated)
 
 
-def read_records_from_folder(folder: Path) -> list[RunRecord]:
-    """Reads every *.jsonl record file in folder. The real ReadRecords adapter."""
-    return [read_record_file(p) for p in sorted(Path(folder).glob("*.jsonl"))]
+def read_record_texts_from_folder(folder: Path) -> list[str]:
+    """The real adapter for run()'s --records-dir: returns each *.jsonl file's
+    raw text, unparsed. Parsing (parse_record) always runs for real afterwards,
+    so this seam is only ever asked to supply bytes, never to judge whether a
+    record is complete."""
+    return [p.read_text() for p in sorted(Path(folder).glob("*.jsonl"))]
 
 
 _BINARY_SUFFIXES = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5, "Ei": 1024**6}

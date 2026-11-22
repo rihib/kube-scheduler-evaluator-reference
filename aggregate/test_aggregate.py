@@ -20,18 +20,21 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 import aggregate
 
 
+def record_text(header: dict, transitions: list[dict]) -> str:
+    """Builds one record's raw JSONL text (header line + transition lines), the
+    shape parse_record takes."""
+    lines = [json.dumps(header)] + [json.dumps(t) for t in transitions]
+    return "\n".join(lines) + "\n"
+
+
 def write_record_file(path: Path, header: dict, transitions: list[dict]) -> None:
-    with path.open("w") as f:
-        f.write(json.dumps(header) + "\n")
-        for t in transitions:
-            f.write(json.dumps(t) + "\n")
+    path.write_text(record_text(header, transitions))
 
 
 def sample_header(**overrides) -> dict:
@@ -57,11 +60,45 @@ def sample_header(**overrides) -> dict:
     return header
 
 
-def test_read_record_file_returns_header_fields(tmp_path: Path) -> None:
-    path = tmp_path / "run.jsonl"
-    write_record_file(path, sample_header(), [])
+SAMPLE_TRANSITIONS = [
+    {
+        "time": "2024-01-01T00:00:00.000000000Z",
+        "seq": 1,
+        "operation": "create_task",
+        "component_id": "instance-1",
+        "task_id": "task-1",
+        "state": "instance_status",
+        "before": None,
+        "after": "pending",
+        "task_immutable": {
+            "owner": "u1",
+            "group": "g1",
+            "job_id": "job-1",
+            "resource_request": {"cpu": "1", "memory": "1Gi", "nvidia.com/gpu": "0"},
+            "resource_limit": {"cpu": "1", "memory": "1Gi", "nvidia.com/gpu": "0"},
+            "priority": 0,
+        },
+    },
+    {
+        "time": "2024-01-01T00:00:10.000000000Z",
+        "seq": 2,
+        "operation": "assign_node",
+        "component_id": "instance-1",
+        "task_id": "task-1",
+        "state": "assigned_node",
+        "before": None,
+        "after": "node-1",
+    },
+]
 
-    record = aggregate.read_record_file(path)
+
+# --- parse_record ---
+
+
+def test_parse_record_returns_header_fields() -> None:
+    text = record_text(sample_header(), [])
+
+    record = aggregate.parse_record(text)
 
     assert record.header.trace_name == "openb"
     assert record.header.trace_version == "v1"
@@ -69,43 +106,13 @@ def test_read_record_file_returns_header_fields(tmp_path: Path) -> None:
     assert record.header.rho == 0.5
     assert record.header.scheduler_profile == "LeastAllocated"
     assert record.header.iteration == 0
+    assert record.truncated is False
 
 
-def test_read_record_file_returns_transitions_in_order(tmp_path: Path) -> None:
-    path = tmp_path / "run.jsonl"
-    transitions = [
-        {
-            "time": "2024-01-01T00:00:00.000000000Z",
-            "seq": 1,
-            "operation": "create_task",
-            "component_id": "instance-1",
-            "task_id": "task-1",
-            "state": "instance_status",
-            "before": None,
-            "after": "pending",
-            "task_immutable": {
-                "owner": "u1",
-                "group": "g1",
-                "job_id": "job-1",
-                "resource_request": {"cpu": "1", "memory": "1Gi", "nvidia.com/gpu": "0"},
-                "resource_limit": {"cpu": "1", "memory": "1Gi", "nvidia.com/gpu": "0"},
-                "priority": 0,
-            },
-        },
-        {
-            "time": "2024-01-01T00:00:10.000000000Z",
-            "seq": 2,
-            "operation": "assign_node",
-            "component_id": "instance-1",
-            "task_id": "task-1",
-            "state": "assigned_node",
-            "before": None,
-            "after": "node-1",
-        },
-    ]
-    write_record_file(path, sample_header(), transitions)
+def test_parse_record_returns_transitions_in_order() -> None:
+    text = record_text(sample_header(), SAMPLE_TRANSITIONS)
 
-    record = aggregate.read_record_file(path)
+    record = aggregate.parse_record(text)
 
     assert len(record.transitions) == 2
     assert record.transitions[0].operation == "create_task"
@@ -115,15 +122,63 @@ def test_read_record_file_returns_transitions_in_order(tmp_path: Path) -> None:
     assert record.transitions[1].after == "node-1"
 
 
-def test_read_records_from_folder_reads_every_jsonl_file(tmp_path: Path) -> None:
+def test_parse_record_raises_when_the_file_is_empty() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        aggregate.parse_record("")
+
+
+def test_parse_record_marks_truncated_when_the_last_line_is_cut_mid_write() -> None:
+    # A write interrupted mid-line (units/U04.md "着手時に決めること") leaves a
+    # dangling fragment, not valid JSON, on the last line.
+    text = record_text(sample_header(), SAMPLE_TRANSITIONS) + '{"time": "2024-01-01T00:00:20'
+
+    record = aggregate.parse_record(text)
+
+    assert record.truncated is True
+    # The dropped fragment carried no complete transition, so the two complete
+    # ones before it are still readable.
+    assert len(record.transitions) == 2
+
+
+def test_parse_record_is_not_truncated_for_a_genuinely_short_complete_record() -> None:
+    # A record that is short because the run itself was short must not be
+    # mistaken for a truncated one: nothing here is cut off mid-line.
+    text = record_text(sample_header(), SAMPLE_TRANSITIONS[:1])
+
+    record = aggregate.parse_record(text)
+
+    assert record.truncated is False
+    assert len(record.transitions) == 1
+
+
+def test_parse_record_raises_when_a_non_last_line_is_malformed() -> None:
+    # Only the last line being malformed is explained by a mid-write cut; a
+    # malformed line anywhere else is a different, genuine corruption.
+    text = record_text(sample_header(), [])[:-1] + "\nnot json at all\n" + json.dumps(SAMPLE_TRANSITIONS[0]) + "\n"
+
+    with pytest.raises(json.JSONDecodeError):
+        aggregate.parse_record(text)
+
+
+def test_parse_record_raises_when_only_line_is_cut_mid_write() -> None:
+    # Dropping the sole (truncated) line leaves nothing to parse a header from.
+    with pytest.raises(ValueError, match="empty"):
+        aggregate.parse_record('{"evaluation_id": "eval-1"')
+
+
+# --- read_record_texts_from_folder ---
+
+
+def test_read_record_texts_from_folder_reads_every_jsonl_file(tmp_path: Path) -> None:
     write_record_file(tmp_path / "run-a.jsonl", sample_header(scheduler={"profile": "LeastAllocated"}), [])
     write_record_file(tmp_path / "run-b.jsonl", sample_header(scheduler={"profile": "MostAllocated"}), [])
     (tmp_path / "not-a-record.txt").write_text("ignore me")
 
-    records = aggregate.read_records_from_folder(tmp_path)
+    texts = aggregate.read_record_texts_from_folder(tmp_path)
 
-    profiles = sorted(r.header.scheduler_profile for r in records)
-    assert profiles == ["LeastAllocated", "MostAllocated"]
+    assert len(texts) == 2
+    assert sum("LeastAllocated" in t for t in texts) == 1
+    assert sum("MostAllocated" in t for t in texts) == 1
 
 
 # --- parse_quantity ---
@@ -287,7 +342,7 @@ def test_compute_metrics_cluster_std_is_time_weighted() -> None:
 
 
 def test_bootstrap_diff_single_version_returns_the_raw_diff() -> None:
-    result = aggregate.bootstrap_diff([4.0], rng=np.random.default_rng(0))
+    result = aggregate.bootstrap_diff([4.0], seed=0)
 
     assert result.raw == pytest.approx(4.0)
     assert result.ci is None
@@ -297,7 +352,7 @@ def test_bootstrap_diff_constant_diffs_has_a_degenerate_ci_at_that_value() -> No
     # Every bootstrap resample of a constant list has the same mean, so the 95% CI
     # collapses to that value regardless of the seed. This gives an expected value
     # that does not depend on how the resampling itself works.
-    result = aggregate.bootstrap_diff([3.0, 3.0, 3.0, 3.0], rng=np.random.default_rng(123))
+    result = aggregate.bootstrap_diff([3.0, 3.0, 3.0, 3.0], seed=123)
 
     assert result.raw is None
     assert result.ci == pytest.approx((3.0, 3.0))
@@ -306,10 +361,24 @@ def test_bootstrap_diff_constant_diffs_has_a_degenerate_ci_at_that_value() -> No
 def test_bootstrap_diff_same_seed_is_reproducible() -> None:
     diffs = [1.0, 2.0, 3.0, 10.0]
 
-    first = aggregate.bootstrap_diff(diffs, rng=np.random.default_rng(42))
-    second = aggregate.bootstrap_diff(diffs, rng=np.random.default_rng(42))
+    first = aggregate.bootstrap_diff(diffs, seed=42)
+    second = aggregate.bootstrap_diff(diffs, seed=42)
 
     assert first.ci == second.ci
+
+
+def test_bootstrap_diff_result_does_not_depend_on_other_calls_sharing_a_seed() -> None:
+    # A single bootstrap_diff call must give the same answer whether or not some
+    # other metric was bootstrapped first with the same seed (rihib:interface-judge
+    # round 1, Must 1): each call builds its own generator from the seed, so calls
+    # never share mutable random state.
+    diffs = [1.0, 2.0, 3.0, 10.0]
+
+    alone = aggregate.bootstrap_diff(diffs, seed=7)
+    aggregate.bootstrap_diff([100.0, -50.0, 3.0], seed=7)  # an unrelated call first
+    after_other_call = aggregate.bootstrap_diff(diffs, seed=7)
+
+    assert alone.ci == after_other_call.ci
 
 
 # --- average_metrics ---
@@ -390,7 +459,7 @@ def test_build_rho_sections_groups_by_rho_and_orders_least_allocated_first() -> 
         make_run_record("LeastAllocated", 1.1, least.transitions),
     ]
 
-    sections = aggregate.build_rho_sections(records, rng=np.random.default_rng(0))
+    sections = aggregate.build_rho_sections(records, seed=0)
 
     assert len(sections) == 1
     section = sections[0]
@@ -413,7 +482,7 @@ def test_build_rho_sections_separates_different_rho_values() -> None:
         make_run_record("LeastAllocated", 1.1, b.transitions),
     ]
 
-    sections = aggregate.build_rho_sections(records, rng=np.random.default_rng(0))
+    sections = aggregate.build_rho_sections(records, seed=0)
 
     assert sorted(s.rho for s in sections) == [0.5, 1.1]
 
@@ -432,7 +501,7 @@ def _two_scheduler_section(rho: float) -> aggregate.RhoSection:
         make_run_record("LeastAllocated", rho, least.transitions),
         make_run_record("MostAllocated", rho, most.transitions),
     ]
-    return aggregate.build_rho_sections(records, rng=np.random.default_rng(0))[0]
+    return aggregate.build_rho_sections(records, seed=0)[0]
 
 
 def test_render_rho_markdown_includes_run_table_and_diffs() -> None:
@@ -473,16 +542,31 @@ def test_render_rho_markdown_rho_1_1_includes_prediction_and_result() -> None:
 class FakeReportWriter:
     def __init__(self) -> None:
         self.texts: dict[str, str] = {}
-        self.figures: dict[str, object] = {}
+        self.blobs: dict[str, bytes] = {}
 
     def write_text(self, relpath: str, content: str) -> None:
         self.texts[relpath] = content
 
-    def write_figure(self, relpath: str, fig) -> None:
-        self.figures[relpath] = fig
+    def write_bytes(self, relpath: str, content: bytes) -> None:
+        self.blobs[relpath] = content
 
 
-def test_write_report_writes_markdown_and_one_figure_per_rho() -> None:
+def _run_record_text(scheduler_profile: str, rho: float, builder: RecordBuilder) -> str:
+    header = sample_header(scheduler={"profile": scheduler_profile}, input={**sample_header()["input"], "rho": rho})
+    return record_text(
+        header,
+        [
+            {
+                "time": t.time, "seq": t.seq, "operation": t.operation, "component_id": t.component_id,
+                "task_id": t.task_id, "state": t.state, "state_key": t.state_key, "before": t.before,
+                "after": t.after, "task_immutable": t.task_immutable,
+            }
+            for t in builder.transitions
+        ],
+    )
+
+
+def test_write_report_writes_markdown_and_one_png_figure_per_rho() -> None:
     least = RecordBuilder()
     least.create_task(0, "task-1", "instance-1")
     least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
@@ -495,11 +579,13 @@ def test_write_report_writes_markdown_and_one_figure_per_rho() -> None:
     ]
     writer = FakeReportWriter()
 
-    aggregate.write_report(records, writer, rng=np.random.default_rng(0))
+    aggregate.write_report(records, writer, seed=0)
 
     assert "report.md" in writer.texts
     assert "ρ = 0.5" in writer.texts["report.md"]
-    assert len(writer.figures) == 1
+    assert len(writer.blobs) == 1
+    png_bytes = next(iter(writer.blobs.values()))
+    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")  # the PNG magic number
 
 
 # --- run (the CLI entry) ---
@@ -509,12 +595,12 @@ def test_run_reads_and_writes_via_injected_fakes() -> None:
     least = RecordBuilder()
     least.create_task(0, "task-1", "instance-1")
     least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    records = [make_run_record("LeastAllocated", 0.5, least.transitions)]
+    texts = [_run_record_text("LeastAllocated", 0.5, least)]
     writer = FakeReportWriter()
 
     code = aggregate.run(
         ["--records-dir", "unused", "--output-dir", "unused", "--seed", "0"],
-        read_records=lambda _: records,
+        read_record_texts=lambda _: texts,
         writer_factory=lambda _: writer,
     )
 
@@ -522,13 +608,13 @@ def test_run_reads_and_writes_via_injected_fakes() -> None:
     assert "report.md" in writer.texts
 
 
-def test_run_fails_when_read_records_raises() -> None:
+def test_run_fails_when_read_record_texts_raises() -> None:
     def failing_read(_):
         raise ValueError("boom")
 
     code = aggregate.run(
         ["--records-dir", "unused", "--output-dir", "unused"],
-        read_records=failing_read,
+        read_record_texts=failing_read,
         writer_factory=lambda _: FakeReportWriter(),
     )
 
@@ -538,7 +624,52 @@ def test_run_fails_when_read_records_raises() -> None:
 def test_run_fails_when_no_records_found() -> None:
     code = aggregate.run(
         ["--records-dir", "unused", "--output-dir", "unused"],
-        read_records=lambda _: [],
+        read_record_texts=lambda _: [],
+        writer_factory=lambda _: FakeReportWriter(),
+    )
+
+    assert code == 1
+
+
+def test_run_fails_when_a_record_fails_to_parse() -> None:
+    code = aggregate.run(
+        ["--records-dir", "unused", "--output-dir", "unused"],
+        read_record_texts=lambda _: ["not json at all"],
+        writer_factory=lambda _: FakeReportWriter(),
+    )
+
+    assert code == 1
+
+
+def test_run_skips_a_truncated_record_and_still_succeeds_with_the_rest() -> None:
+    least = RecordBuilder()
+    least.create_task(0, "task-1", "instance-1")
+    least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most = RecordBuilder()
+    most.create_task(0, "task-1", "instance-1")
+    most.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    good_texts = [_run_record_text("LeastAllocated", 0.5, least), _run_record_text("MostAllocated", 0.5, most)]
+    truncated_text = good_texts[0] + '{"time": "2024-01-01T00:00:20'  # cut off mid-line
+    writer = FakeReportWriter()
+
+    code = aggregate.run(
+        ["--records-dir", "unused", "--output-dir", "unused"],
+        read_record_texts=lambda _: [*good_texts, truncated_text],
+        writer_factory=lambda _: writer,
+    )
+
+    assert code == 0
+    assert "report.md" in writer.texts
+
+
+def test_run_fails_when_every_record_is_truncated() -> None:
+    least = RecordBuilder()
+    least.create_task(0, "task-1", "instance-1")
+    only_truncated = _run_record_text("LeastAllocated", 0.5, least) + '{"time": "2024-01-01T00:00:20'
+
+    code = aggregate.run(
+        ["--records-dir", "unused", "--output-dir", "unused"],
+        read_record_texts=lambda _: [only_truncated],
         writer_factory=lambda _: FakeReportWriter(),
     )
 
@@ -556,18 +687,7 @@ def test_run_writes_report_and_figures_to_real_output_dir(tmp_path: Path) -> Non
     b = RecordBuilder()
     b.create_task(0, "task-1", "instance-1")
     b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    write_record_file(
-        records_dir / "run-a.jsonl",
-        sample_header(scheduler={"profile": "LeastAllocated"}),  # rho defaults to 0.5
-        [
-            {
-                "time": t.time, "seq": t.seq, "operation": t.operation, "component_id": t.component_id,
-                "task_id": t.task_id, "state": t.state, "state_key": t.state_key, "before": t.before,
-                "after": t.after, "task_immutable": t.task_immutable,
-            }
-            for t in b.transitions
-        ],
-    )
+    (records_dir / "run-a.jsonl").write_text(_run_record_text("LeastAllocated", 0.5, b))
 
     code = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(output_dir)])
 
@@ -587,6 +707,25 @@ def test_run_fails_when_records_dir_has_corrupt_jsonl(tmp_path: Path) -> None:
     code = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(output_dir)])
 
     assert code == 1
+
+
+@pytest.mark.integration
+def test_run_skips_a_record_truncated_on_disk_and_still_succeeds(tmp_path: Path) -> None:
+    records_dir = tmp_path / "records"
+    records_dir.mkdir()
+    output_dir = tmp_path / "out"
+    good = RecordBuilder()
+    good.create_task(0, "task-1", "instance-1")
+    good.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    (records_dir / "good.jsonl").write_text(_run_record_text("LeastAllocated", 0.5, good))
+    (records_dir / "cut-off.jsonl").write_text(
+        _run_record_text("MostAllocated", 0.5, good) + '{"time": "2024-01-01T00:00:20'
+    )
+
+    code = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(output_dir)])
+
+    assert code == 0
+    assert (output_dir / "report.md").exists()
 
 
 @pytest.mark.integration
