@@ -299,7 +299,8 @@ class _MetricsAccumulator:
     def __init__(self) -> None:
         self._alloc_weighted: dict[str, float] = {}
         self._alloc_duration: dict[str, float] = {}
-        self.unplaceable_free: dict[str, float] = {}
+        self._measured_resources: set[str] = set()
+        self._unplaceable_free_weighted: dict[str, float] = {}
         self._cluster_std_weighted = 0.0
         self._cluster_std_duration = 0.0
 
@@ -307,6 +308,7 @@ class _MetricsAccumulator:
         if duration <= 0:
             return
         resources = world.resource_names()
+        self._measured_resources |= resources
         free_sum, free_max = _resource_free_aggregates(world, resources)
 
         for r in resources:
@@ -317,7 +319,7 @@ class _MetricsAccumulator:
 
         if _is_fragmentation_blocked(world, free_sum, free_max):
             for r in resources:
-                self.unplaceable_free[r] = self.unplaceable_free.get(r, 0.0) + free_sum[r] * duration
+                self._unplaceable_free_weighted[r] = self._unplaceable_free_weighted.get(r, 0.0) + free_sum[r] * duration
 
         counts = world.running_pod_counts_by_node()
         if counts:
@@ -326,6 +328,23 @@ class _MetricsAccumulator:
 
     def allocation_rate(self) -> dict[str, float]:
         return {r: self._alloc_weighted[r] / self._alloc_duration[r] for r in self._alloc_weighted if self._alloc_duration.get(r, 0.0) > 0}
+
+    def unplaceable_free(self) -> dict[str, float]:
+        """One entry per resource this run actually watched for at least one
+        interval, 0.0 for the ones that never hit fragmentation.
+
+        Fragmentation only writes a key while it is happening, so a sparse dict
+        cannot tell "watched this resource the whole run and it was never
+        fragmented" (a measured 0) apart from "never watched this resource"
+        (round3 review, correctness Must 1: both the diff and the per-run table
+        read a missing key as "not measured", which dropped scenario 6's
+        置けない空き資源の量 from the ρ = 1.1 diff whenever one scheduler
+        happened not to fragment, and made the whole column "n/a" at ρ = 0.5).
+        Filling in the watched resources here keeps "key missing" meaning one
+        thing — this run had no interval in which the resource existed — for
+        every reader downstream.
+        """
+        return {r: self._unplaceable_free_weighted.get(r, 0.0) for r in self._measured_resources}
 
     def cluster_std(self) -> float | None:
         if self._cluster_std_duration <= 0:
@@ -417,7 +436,7 @@ def compute_metrics(transitions: Sequence[Transition]) -> Metrics:
         pending_wait_by_class=pending_wait_by_class,
         pending_count_at_end=pending_count_at_end,
         allocation_rate=accumulator.allocation_rate(),
-        unplaceable_free=accumulator.unplaceable_free,
+        unplaceable_free=accumulator.unplaceable_free(),
         cluster_std=accumulator.cluster_std(),
         nonzero_wait_fraction=nonzero_wait_fraction,
     )
@@ -511,6 +530,12 @@ def average_metrics(iterations: list[Metrics]) -> VersionAverage:
     excluded from that resource's average rather than folded in as a
     measured 0, the same "not measured, not zero" treatment cluster_std and
     nonzero_wait_fraction already get via _mean_optional.
+
+    A missing key is the *only* sign of "not measured" this relies on, which
+    is why _MetricsAccumulator.unplaceable_free fills in a 0.0 for every
+    resource a run watched (round3 review, correctness Must 1). An iteration
+    that watched a resource and saw no fragmentation therefore still counts
+    towards that resource's denominator.
     """
     resources = {r for m in iterations for r in set(m.allocation_rate) | set(m.unplaceable_free)}
     pending_wait_by_class: dict[str, list[float]] = {}
@@ -582,6 +607,12 @@ def _scalar_pairs(a: VersionAverage, b: VersionAverage):
     record had zero transitions — units/U04.md "着手時に決めること"), which
     must not be diffed against a default of 0 as if it had been measured and
     was exactly zero.
+
+    This is only sound because a missing key really does mean "not measured"
+    by the time it gets here: _MetricsAccumulator.unplaceable_free fills in a
+    measured 0.0 for every resource a run watched (round3 review, correctness
+    Must 1), and run() drops records with no transitions at all (Must 2), so
+    the intersection never silently discards a real 0.
     """
     yield "pending_count_at_end", a.pending_count_at_end, b.pending_count_at_end
     if a.cluster_std is not None and b.cluster_std is not None:
@@ -710,7 +741,10 @@ def _render_per_run_table(section: RhoSection) -> list[str]:
         ]
         # .get(r) (not .get(r, 0.0)): a resource this run's record never saw
         # (no node registered with it) is "n/a", not a measured 0 (round2
-        # review, correctness IMO, round1 leftover).
+        # review, correctness IMO, round1 leftover). A resource the run did
+        # watch always has a key — unplaceable_free included, even with no
+        # fragmentation — so this prints "n/a" only for genuinely unmeasured
+        # resources (round3 review, correctness Must 1).
         row += [_format_optional(metrics.allocation_rate.get(r)) for r in resources]
         row += [_format_optional(metrics.unplaceable_free.get(r)) for r in resources]
         lines.append("| " + " | ".join(row) + " |")
