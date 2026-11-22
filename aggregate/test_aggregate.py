@@ -1143,6 +1143,34 @@ def test_render_rho_markdown_rho_1_1_shows_a_reason_when_no_version_has_both_sch
     assert "そろわ" in prediction_section
 
 
+def test_render_rho_markdown_rho_1_1_says_which_metrics_were_missing_when_the_versions_did_line_up() -> None:
+    # round3 review, correctness Must 4 / maintainability Must: the ρ = 1.1
+    # section filters the diff down to the keys its prediction is about
+    # (wait: / unplaceable_free:), which can come out empty while the diff
+    # itself has other metrics. Blaming "the two profiles never coexisted in
+    # any input version" there told the reader the wrong reason: here both
+    # schedulers ran the same version, and the diff table below shows it.
+    least = RecordBuilder()  # no tasks at all, so no wait times to compare
+    least.register_node(0, "node-1", {"cpu": "10"})
+    least.register_node(10, "node-2", {"cpu": "1"})
+    most = RecordBuilder()  # and a disjoint resource, so no unplaceable_free to compare
+    most.register_node(0, "node-3", {"nvidia.com/gpu": "4"})
+    most.register_node(10, "node-4", {"nvidia.com/gpu": "1"})
+    records = [
+        make_run_record("LeastAllocated", 1.1, least.transitions),
+        make_run_record("MostAllocated", 1.1, most.transitions),
+    ]
+    section = aggregate.build_rho_sections(records, seed=0)[0]
+
+    md = aggregate.render_rho_markdown(section)
+
+    assert "pending_count_at_end" in md.split("### スケジューラの差")[1]  # the versions did line up
+    prediction_section = md.split("### 予測と結果（高負荷）")[1]
+    assert "| metric |" not in prediction_section
+    assert "そろわ" not in prediction_section
+    assert "予測の対象" in prediction_section
+
+
 def test_render_rho_markdown_rho_1_1_section_names_a_missing_distributed_scheduler() -> None:
     # Round1 review, Must: when the configured distributed scheduler isn't one
     # of this ρ's profiles, the ρ = 1.1 section must say so instead of just
