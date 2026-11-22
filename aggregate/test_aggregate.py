@@ -1328,7 +1328,7 @@ def test_run_fails_when_read_record_texts_raises() -> None:
     assert code == 1
 
 
-def test_run_lets_a_non_os_error_from_read_record_texts_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_lets_a_non_os_error_from_read_record_texts_propagate() -> None:
     # round2 review, correctness IMO (aggregate.py:880): a wide
     # `except Exception` around reading records turned a bug inside
     # read_record_texts into a misleading "failed to read records" message
