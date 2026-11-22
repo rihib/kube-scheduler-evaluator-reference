@@ -453,6 +453,150 @@ def build_rho_sections(records: list[RunRecord], rng) -> list[RhoSection]:
     return sections
 
 
+def _format_diff(diff: DiffResult) -> str:
+    if diff.raw is not None:
+        return f"{diff.raw:.4f}"
+    return f"[{diff.ci[0]:.4f}, {diff.ci[1]:.4f}]"
+
+
+def _prediction_holds(diff: DiffResult) -> bool:
+    """True if the diff (LeastAllocated − the other scheduler) supports
+    experiment.md 3.1's prediction that LeastAllocated's value is bigger. A
+    bootstrap CI only counts as support when the whole interval is positive."""
+    if diff.raw is not None:
+        return diff.raw > 0
+    return diff.ci[0] > 0
+
+
+def render_rho_markdown(section: RhoSection) -> str:
+    """Renders one ρ's section of the report (units/U04.md): a per-run metrics
+    table, the diff between the two schedulers, and, for ρ = 0.5 and ρ = 1.1, the
+    extra context scenarios 5 and 6 need to judge the negative control and the
+    high-load prediction."""
+    lines = [f"## ρ = {section.rho}", ""]
+
+    lines.append("### 実行ごとのメトリクス")
+    lines.append("")
+    lines.append("| scheduler | iteration | pending_count_at_end | cluster_std | nonzero_wait_fraction |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for record, metrics in section.runs:
+        lines.append(
+            f"| {record.header.scheduler_profile} | {record.header.iteration} | "
+            f"{metrics.pending_count_at_end} | {metrics.cluster_std:.4f} | {metrics.nonzero_wait_fraction:.4f} |"
+        )
+    lines.append("")
+
+    if section.diffs:
+        a, b = section.scheduler_order
+        lines.append("### スケジューラの差")
+        lines.append("")
+        lines.append(f"{a} − {b}")
+        lines.append("")
+        lines.append("| metric | diff |")
+        lines.append("| --- | --- |")
+        for key in sorted(section.diffs):
+            lines.append(f"| {key} | {_format_diff(section.diffs[key])} |")
+        lines.append("")
+
+    if section.rho == 0.5:
+        lines.append("### 陰性対照")
+        lines.append("")
+        lines.append("待機時間が0でないPodの割合:")
+        lines.append("")
+        for record, metrics in section.runs:
+            lines.append(f"- {record.header.scheduler_profile}: {metrics.nonzero_wait_fraction:.4f}")
+        wait_keys = sorted(k for k in section.diffs if k.startswith("wait:"))
+        if wait_keys:
+            lines.append("")
+            lines.append("待機時間の差:")
+            lines.append("")
+            for key in wait_keys:
+                lines.append(f"- {key}: {_format_diff(section.diffs[key])}")
+        lines.append("")
+
+    if section.rho == 1.1 and section.scheduler_order and "LeastAllocated" in section.scheduler_order:
+        lines.append("### 予測と結果（高負荷）")
+        lines.append("")
+        lines.append(
+            "予測（experiment.md 3.1）: LeastAllocated の方が、大きな要求を持つタスクの"
+            "待機時間と、置けない空き資源の量が大きい。"
+        )
+        lines.append("")
+        prediction_keys = sorted(k for k in section.diffs if k.startswith("wait:") or k.startswith("unplaceable_free:"))
+        if prediction_keys:
+            lines.append("| metric | diff（LeastAllocated − 他） | 予測が当たったか |")
+            lines.append("| --- | --- | --- |")
+            for key in prediction_keys:
+                diff = section.diffs[key]
+                outcome = "当たった" if _prediction_holds(diff) else "当たらなかった"
+                lines.append(f"| {key} | {_format_diff(diff)} | {outcome} |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def build_figures(sections: list[RhoSection]) -> list[tuple[str, object]]:
+    """Builds one boxplot figure per ρ, comparing the pending wait time
+    distribution by GPU class and scheduler (scenario 4)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figures = []
+    for section in sections:
+        fig, ax = plt.subplots()
+        data: list[list[float]] = []
+        labels: list[str] = []
+        for record, metrics in section.runs:
+            for cls in sorted(metrics.pending_wait_by_class):
+                waits = metrics.pending_wait_by_class[cls]
+                if waits:
+                    data.append(waits)
+                    labels.append(f"{record.header.scheduler_profile}\n{cls} GPU")
+        if data:
+            ax.boxplot(data, tick_labels=labels)
+        ax.set_title(f"pending wait time (ρ={section.rho})")
+        ax.set_ylabel("seconds")
+        fig.tight_layout()
+        figures.append((f"figures/rho-{section.rho}-wait.png", fig))
+    return figures
+
+
+class FileReportWriter:
+    """The real report-writing adapter (decisions.md): writes to files under
+    output_dir."""
+
+    def __init__(self, output_dir: Path) -> None:
+        self.output_dir = Path(output_dir)
+
+    def write_text(self, relpath: str, content: str) -> None:
+        path = self.output_dir / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def write_figure(self, relpath: str, fig) -> None:
+        path = self.output_dir / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path)
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def write_report(records: list[RunRecord], writer, rng) -> None:
+    """Builds and writes experiment 1's report (scenario 4): one section per ρ,
+    with ρ = 0.5's negative control and ρ = 1.1's prediction/result pairing
+    (scenarios 5 and 6)."""
+    sections = build_rho_sections(records, rng)
+    lines = ["# 実験1 集計報告", ""]
+    for section in sections:
+        lines.append(render_rho_markdown(section))
+    writer.write_text("report.md", "\n".join(lines))
+    for relpath, fig in build_figures(sections):
+        writer.write_figure(relpath, fig)
+
+
 def read_record_file(path: Path) -> RunRecord:
     """Reads one run's JSONL record file (header line + transition lines)."""
     with path.open() as f:
