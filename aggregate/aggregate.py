@@ -1022,12 +1022,25 @@ def run(
             print(f"error: failed to parse {path}: {e}", file=sys.stderr)
             return 1
 
-    records = [r for r in parsed if not r.truncated]
-    truncated_count = len(parsed) - len(records)
+    records = [r for r in parsed if not r.truncated and r.transitions]
+    truncated_count = sum(1 for r in parsed if r.truncated)
+    # A record whose write was interrupted right after the header parses as
+    # complete (units/U04.md "着手時に決めること" — the cut landed on a line
+    # boundary, so truncated stays False) but observed nothing at all. Its
+    # pending_count_at_end of 0 is not a measurement, and unlike the
+    # per-resource metrics there is no missing key to tell the diff so: left
+    # in, it reported a difference between the two schedulers that no run ever
+    # observed (round3 review, correctness Must 2).
+    transitionless_count = sum(1 for r in parsed if not r.truncated and not r.transitions)
     if truncated_count:
         print(f"warning: skipped {truncated_count} truncated record(s) under {args.records_dir}", file=sys.stderr)
+    if transitionless_count:
+        print(
+            f"warning: skipped {transitionless_count} record(s) with no transitions (遷移が無い) under {args.records_dir}",
+            file=sys.stderr,
+        )
     if not records:
-        print(f"error: no complete records to aggregate under {args.records_dir}", file=sys.stderr)
+        print(f"error: no complete record with transitions to aggregate under {args.records_dir}", file=sys.stderr)
         return 1
 
     writer = writer_factory(Path(args.output_dir))
