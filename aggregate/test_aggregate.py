@@ -500,3 +500,103 @@ def test_write_report_writes_markdown_and_one_figure_per_rho() -> None:
     assert "report.md" in writer.texts
     assert "ρ = 0.5" in writer.texts["report.md"]
     assert len(writer.figures) == 1
+
+
+# --- run (the CLI entry) ---
+
+
+def test_run_reads_and_writes_via_injected_fakes() -> None:
+    least = RecordBuilder()
+    least.create_task(0, "task-1", "instance-1")
+    least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    records = [make_run_record("LeastAllocated", 0.5, least.transitions)]
+    writer = FakeReportWriter()
+
+    code = aggregate.run(
+        ["--records-dir", "unused", "--output-dir", "unused", "--seed", "0"],
+        read_records=lambda _: records,
+        writer_factory=lambda _: writer,
+    )
+
+    assert code == 0
+    assert "report.md" in writer.texts
+
+
+def test_run_fails_when_read_records_raises() -> None:
+    def failing_read(_):
+        raise ValueError("boom")
+
+    code = aggregate.run(
+        ["--records-dir", "unused", "--output-dir", "unused"],
+        read_records=failing_read,
+        writer_factory=lambda _: FakeReportWriter(),
+    )
+
+    assert code == 1
+
+
+def test_run_fails_when_no_records_found() -> None:
+    code = aggregate.run(
+        ["--records-dir", "unused", "--output-dir", "unused"],
+        read_records=lambda _: [],
+        writer_factory=lambda _: FakeReportWriter(),
+    )
+
+    assert code == 1
+
+
+# --- integration tests: real folders, real adapters ---
+
+
+@pytest.mark.integration
+def test_run_writes_report_and_figures_to_real_output_dir(tmp_path: Path) -> None:
+    records_dir = tmp_path / "records"
+    records_dir.mkdir()
+    output_dir = tmp_path / "out"
+    b = RecordBuilder()
+    b.create_task(0, "task-1", "instance-1")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    write_record_file(
+        records_dir / "run-a.jsonl",
+        sample_header(scheduler={"profile": "LeastAllocated"}),  # rho defaults to 0.5
+        [
+            {
+                "time": t.time, "seq": t.seq, "operation": t.operation, "component_id": t.component_id,
+                "task_id": t.task_id, "state": t.state, "state_key": t.state_key, "before": t.before,
+                "after": t.after, "task_immutable": t.task_immutable,
+            }
+            for t in b.transitions
+        ],
+    )
+
+    code = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(output_dir)])
+
+    assert code == 0
+    assert (output_dir / "report.md").exists()
+    assert "ρ = 0.5" in (output_dir / "report.md").read_text(encoding="utf-8")
+    assert list((output_dir / "figures").glob("*.png"))
+
+
+@pytest.mark.integration
+def test_run_fails_when_records_dir_has_corrupt_jsonl(tmp_path: Path) -> None:
+    records_dir = tmp_path / "records"
+    records_dir.mkdir()
+    (records_dir / "broken.jsonl").write_text("{not valid json\n")
+    output_dir = tmp_path / "out"
+
+    code = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(output_dir)])
+
+    assert code == 1
+
+
+@pytest.mark.integration
+def test_run_fails_when_records_dir_is_missing(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+
+    code = aggregate.run(["--records-dir", str(tmp_path / "does-not-exist"), "--output-dir", str(output_dir)])
+
+    assert code == 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))
