@@ -98,3 +98,32 @@ def read_record_file(path: Path) -> RunRecord:
 def read_records_from_folder(folder: Path) -> list[RunRecord]:
     """Reads every *.jsonl record file in folder. The real ReadRecords adapter."""
     return [read_record_file(p) for p in sorted(Path(folder).glob("*.jsonl"))]
+
+
+_BINARY_SUFFIXES = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5, "Ei": 1024**6}
+_DECIMAL_SUFFIXES = {"n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15, "E": 1e18}
+
+
+def parse_quantity(value: str) -> float:
+    """Parses a Kubernetes resource quantity string (e.g. "500m", "1Gi") into a float
+    in base units (cores, bytes, or GPU count)."""
+    value = value.strip()
+    for suffix, factor in _BINARY_SUFFIXES.items():
+        if value.endswith(suffix):
+            return float(value[: -len(suffix)]) * factor
+    for suffix, factor in _DECIMAL_SUFFIXES.items():
+        if value.endswith(suffix):
+            return float(value[: -len(suffix)]) * factor
+    return float(value)
+
+
+def classify_gpu_class(gpu_count: float) -> str:
+    """Classifies a task's GPU request into experiment 1's request classes
+    (units/U04.md): 0, 1, 2-4, or 8+ GPUs."""
+    if gpu_count <= 0:
+        return "0"
+    if gpu_count == 1:
+        return "1"
+    if gpu_count <= 4:
+        return "2-4"
+    return "8"
