@@ -6,6 +6,7 @@
 #   "matplotlib",
 # ]
 # ///
+
 """Unit and integration tests for aggregate.py.
 
 Run with: uv run --with pytest aggregate/test_aggregate.py
@@ -19,6 +20,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -279,3 +281,32 @@ def test_compute_metrics_cluster_std_is_time_weighted() -> None:
     metrics = aggregate.compute_metrics(b.transitions)
 
     assert metrics.cluster_std == pytest.approx(0.5)
+
+
+# --- bootstrap_diff ---
+
+
+def test_bootstrap_diff_single_version_returns_the_raw_diff() -> None:
+    result = aggregate.bootstrap_diff([4.0], rng=np.random.default_rng(0))
+
+    assert result.raw == pytest.approx(4.0)
+    assert result.ci is None
+
+
+def test_bootstrap_diff_constant_diffs_has_a_degenerate_ci_at_that_value() -> None:
+    # Every bootstrap resample of a constant list has the same mean, so the 95% CI
+    # collapses to that value regardless of the seed. This gives an expected value
+    # that does not depend on how the resampling itself works.
+    result = aggregate.bootstrap_diff([3.0, 3.0, 3.0, 3.0], rng=np.random.default_rng(123))
+
+    assert result.raw is None
+    assert result.ci == pytest.approx((3.0, 3.0))
+
+
+def test_bootstrap_diff_same_seed_is_reproducible() -> None:
+    diffs = [1.0, 2.0, 3.0, 10.0]
+
+    first = aggregate.bootstrap_diff(diffs, rng=np.random.default_rng(42))
+    second = aggregate.bootstrap_diff(diffs, rng=np.random.default_rng(42))
+
+    assert first.ci == second.ci

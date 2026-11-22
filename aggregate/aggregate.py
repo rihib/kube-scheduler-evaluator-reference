@@ -314,6 +314,28 @@ def compute_metrics(transitions: list[Transition]) -> Metrics:
     )
 
 
+@dataclass(frozen=True)
+class DiffResult:
+    """A - B for one metric, across input versions (decisions.md).
+
+    raw holds the single value when there is exactly one version; ci holds the
+    bootstrap 95% confidence interval when there are more than one. Exactly one
+    of the two is set.
+    """
+
+    raw: float | None
+    ci: tuple[float, float] | None
+
+
+def bootstrap_diff(diffs: list[float], rng, resamples: int = 10000) -> DiffResult:
+    """Combines per-version diffs (scheduler A's metric minus scheduler B's, one
+    value per input version) into the value to report: the diff itself when there
+    is one version, otherwise a bootstrap 95% CI. rng is injected (decisions.md)
+    so the same seed always yields the same CI.
+    """
+    return DiffResult(raw=None, ci=None)
+
+
 def read_record_file(path: Path) -> RunRecord:
     """Reads one run's JSONL record file (header line + transition lines)."""
     with path.open() as f:
