@@ -93,3 +93,8 @@ def read_record_file(path: Path) -> RunRecord:
         for t in lines[1:]
     ]
     return RunRecord(header=header, transitions=transitions)
+
+
+def read_records_from_folder(folder: Path) -> list[RunRecord]:
+    """Reads every *.jsonl record file in folder. The real ReadRecords adapter."""
+    return [read_record_file(p) for p in sorted(Path(folder).glob("*.jsonl"))]
