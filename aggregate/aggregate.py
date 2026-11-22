@@ -693,16 +693,9 @@ def _is_large_request_metric(key: str) -> bool:
     return False
 
 
-def render_rho_markdown(section: RhoSection) -> str:
-    """Renders one ρ's section of the report (units/U04.md): a per-run metrics
-    table, the diff between the two schedulers, and, for ρ = 0.5 and ρ = 1.1, the
-    extra context scenarios 5 and 6 need to judge the negative control and the
-    high-load prediction."""
+def _render_per_run_table(section: RhoSection) -> list[str]:
     resources = sorted({r for _, m in section.runs for r in set(m.allocation_rate) | set(m.unplaceable_free)})
-    lines = [f"## ρ = {section.rho}", ""]
-
-    lines.append("### 実行ごとのメトリクス")
-    lines.append("")
+    lines = ["### 実行ごとのメトリクス", ""]
     header_cols = ["scheduler", "iteration", "pending_count_at_end", "cluster_std", "nonzero_wait_fraction"]
     header_cols += [f"allocation_rate:{r}" for r in resources] + [f"unplaceable_free:{r}" for r in resources]
     lines.append("| " + " | ".join(header_cols) + " |")
@@ -722,96 +715,127 @@ def render_rho_markdown(section: RhoSection) -> str:
         row += [_format_optional(metrics.unplaceable_free.get(r)) for r in resources]
         lines.append("| " + " | ".join(row) + " |")
     lines.append("")
+    return lines
 
-    lines.append("### 待機時間の分布")
-    lines.append("")
-    lines.append(f"![pending wait time distribution for ρ = {section.rho}]({_figure_relpath(section.rho)})")
-    lines.append("")
 
-    if section.scheduler_order:
-        a, b = section.scheduler_order
-        lines.append("### スケジューラの差")
-        lines.append("")
-        lines.append(f"{a} − {b}")
-        lines.append("")
-        if section.diffs:
-            lines.append("| metric | diff |")
-            lines.append("| --- | --- |")
-            for key in sorted(section.diffs):
-                lines.append(f"| {key} | {_format_diff(section.diffs[key])} |")
-        else:
-            # round2 review, Must: scheduler_order can be set (exactly two
-            # profiles found at this ρ) while diffs is still empty, when the
-            # two profiles never coexist within the same input version
-            # (_diffs_for_group's per-version continue fires every time). A
-            # header with no rows would hide that reason from the reader.
-            lines.append(f"{a} と {b} がどの入力の版でもそろわず、差を計算できなかった。")
-        lines.append("")
-    else:
-        lines.append("### スケジューラの差")
-        lines.append("")
+def _render_wait_distribution_section(section: RhoSection) -> list[str]:
+    return [
+        "### 待機時間の分布",
+        "",
+        f"![pending wait time distribution for ρ = {section.rho}]({_figure_relpath(section.rho)})",
+        "",
+    ]
+
+
+def _render_diff_section(section: RhoSection) -> list[str]:
+    lines = ["### スケジューラの差", ""]
+    if not section.scheduler_order:
         lines.append(
             f"この ρ では {len(section.found_schedulers)} 個のスケジューラのプロファイルが"
             f"見つかった: {', '.join(section.found_schedulers) or '(なし)'}。"
             "差は、プロファイルがちょうど2つのときだけ計算する。"
         )
         lines.append("")
+        return lines
 
-    if _rho_is(section.rho, RHO_NEGATIVE_CONTROL):
-        lines.append("### 陰性対照")
-        lines.append("")
-        lines.append("待機時間が0でないPodの割合:")
-        lines.append("")
-        for record, metrics in section.runs:
-            lines.append(f"- {record.header.scheduler_profile}: {_format_optional(metrics.nonzero_wait_fraction)}")
-        wait_keys = sorted(k for k in section.diffs if k.startswith("wait:"))
-        if wait_keys:
-            lines.append("")
-            lines.append("待機時間の差:")
-            lines.append("")
-            for key in wait_keys:
-                lines.append(f"- {key}: {_format_diff(section.diffs[key])}")
-        lines.append("")
+    a, b = section.scheduler_order
+    lines.append(f"{a} − {b}")
+    lines.append("")
+    if section.diffs:
+        lines.append("| metric | diff |")
+        lines.append("| --- | --- |")
+        for key in sorted(section.diffs):
+            lines.append(f"| {key} | {_format_diff(section.diffs[key])} |")
+    else:
+        # round2 review, Must: scheduler_order can be set (exactly two
+        # profiles found at this ρ) while diffs is still empty, when the
+        # two profiles never coexist within the same input version
+        # (_diffs_for_group's per-version continue fires every time). A
+        # header with no rows would hide that reason from the reader.
+        lines.append(f"{a} と {b} がどの入力の版でもそろわず、差を計算できなかった。")
+    lines.append("")
+    return lines
 
-    if _rho_is(section.rho, RHO_HIGH_LOAD):
-        lines.append("### 予測と結果（高負荷）")
+
+def _render_negative_control_section(section: RhoSection) -> list[str]:
+    if not _rho_is(section.rho, RHO_NEGATIVE_CONTROL):
+        return []
+    lines = ["### 陰性対照", "", "待機時間が0でないPodの割合:", ""]
+    for record, metrics in section.runs:
+        lines.append(f"- {record.header.scheduler_profile}: {_format_optional(metrics.nonzero_wait_fraction)}")
+    wait_keys = sorted(k for k in section.diffs if k.startswith("wait:"))
+    if wait_keys:
         lines.append("")
-        lines.append(
+        lines.append("待機時間の差:")
+        lines.append("")
+        for key in wait_keys:
+            lines.append(f"- {key}: {_format_diff(section.diffs[key])}")
+    lines.append("")
+    return lines
+
+
+def _render_high_load_section(section: RhoSection) -> list[str]:
+    if not _rho_is(section.rho, RHO_HIGH_LOAD):
+        return []
+    lines = [
+        "### 予測と結果（高負荷）",
+        "",
+        (
             f"予測（experiment.md 3.1）: {section.distributed_scheduler} の方が、大きな要求を持つ"
             "タスクの待機時間と、置けない空き資源の量が大きい。"
+        ),
+        "",
+    ]
+    if not section.scheduler_order or section.distributed_scheduler not in section.scheduler_order:
+        lines.append(
+            f"この ρ の記録に分散型として指定されたスケジューラ（{section.distributed_scheduler}）が"
+            f"見つからない（見つかったプロファイル: {', '.join(section.found_schedulers) or '(なし)'}）。"
+            "予測と結果は示せない。"
         )
         lines.append("")
-        if not section.scheduler_order or section.distributed_scheduler not in section.scheduler_order:
-            lines.append(
-                f"この ρ の記録に分散型として指定されたスケジューラ（{section.distributed_scheduler}）が"
-                f"見つからない（見つかったプロファイル: {', '.join(section.found_schedulers) or '(なし)'}）。"
-                "予測と結果は示せない。"
-            )
-            lines.append("")
-        else:
-            all_keys = sorted(k for k in section.diffs if k.startswith(("wait:", "unplaceable_free:")))
-            if all_keys:
-                diff_label = f"diff（{section.distributed_scheduler} − 他）"
-                lines.append(f"| metric | {diff_label} | 予測が当たったか |")
-                lines.append("| --- | --- | --- |")
-                for key in all_keys:
-                    diff = section.diffs[key]
-                    if _is_large_request_metric(key):
-                        outcome = "当たった" if _prediction_holds(diff) else "当たらなかった"
-                    else:
-                        outcome = "—（予測の対象外）"
-                    lines.append(f"| {key} | {_format_diff(diff)} | {outcome} |")
-            else:
-                # round2 review, Must: the same empty-diffs case as the "スケ
-                # ジューラの差" section above (profiles found but never within
-                # the same input version) must not render an empty table here
-                # either.
-                lines.append(
-                    f"{', '.join(section.scheduler_order)} がどの入力の版でもそろわず、"
-                    "予測と結果を示せなかった。"
-                )
-            lines.append("")
+        return lines
 
+    all_keys = sorted(k for k in section.diffs if k.startswith(("wait:", "unplaceable_free:")))
+    if all_keys:
+        diff_label = f"diff（{section.distributed_scheduler} − 他）"
+        lines.append(f"| metric | {diff_label} | 予測が当たったか |")
+        lines.append("| --- | --- | --- |")
+        for key in all_keys:
+            diff = section.diffs[key]
+            if _is_large_request_metric(key):
+                outcome = "当たった" if _prediction_holds(diff) else "当たらなかった"
+            else:
+                outcome = "—（予測の対象外）"
+            lines.append(f"| {key} | {_format_diff(diff)} | {outcome} |")
+    else:
+        # round2 review, Must: the same empty-diffs case as _render_diff_
+        # section above (profiles found but never within the same input
+        # version) must not render an empty table here either.
+        lines.append(
+            f"{', '.join(section.scheduler_order)} がどの入力の版でもそろわず、"
+            "予測と結果を示せなかった。"
+        )
+    lines.append("")
+    return lines
+
+
+def render_rho_markdown(section: RhoSection) -> str:
+    """Renders one ρ's section of the report (units/U04.md): a per-run metrics
+    table, the diff between the two schedulers, and, for ρ = 0.5 and ρ = 1.1, the
+    extra context scenarios 5 and 6 need to judge the negative control and the
+    high-load prediction.
+
+    Each independently-varying piece (round2 review, maintainability IMO: this
+    used to be a single ~100-line function mixing all of them) is its own
+    `_render_*_section` helper returning its own lines; this function only
+    calls them in order and joins the result.
+    """
+    lines = [f"## ρ = {section.rho}", ""]
+    lines += _render_per_run_table(section)
+    lines += _render_wait_distribution_section(section)
+    lines += _render_diff_section(section)
+    lines += _render_negative_control_section(section)
+    lines += _render_high_load_section(section)
     return "\n".join(lines)
 
 
@@ -887,9 +911,11 @@ def write_report(records: Sequence[RunRecord], writer, *, seed: int, distributed
         # approximation (_is_fragmentation_blocked), not an exact "does any single
         # node satisfy this request" check; it can under-count (never over-count)
         # fragmentation spanning more than one resource at once.
-        "`unplaceable_free`（置けない空き資源の量）は、資源ごとの空きの最大値で判定する近似であり、"
-        "資源ごとには空きがあっても同じノードにまとまっていない場合の断片化を見落とすことがある"
-        "（実際より小さく出る方向にのみ外れる）。",
+        (
+            "`unplaceable_free`（置けない空き資源の量）は、資源ごとの空きの最大値で判定する近似であり、"
+            "資源ごとには空きがあっても同じノードにまとまっていない場合の断片化を見落とすことがある"
+            "（実際より小さく出る方向にのみ外れる）。"
+        ),
         "",
     ]
     for section in sections:
