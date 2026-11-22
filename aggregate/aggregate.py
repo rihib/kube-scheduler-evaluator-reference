@@ -841,13 +841,26 @@ def _render_high_load_section(section: RhoSection) -> list[str]:
             else:
                 outcome = "—（予測の対象外）"
             lines.append(f"| {key} | {_format_diff(diff)} | {outcome} |")
-    else:
-        # round2 review, Must: the same empty-diffs case as _render_diff_
-        # section above (profiles found but never within the same input
-        # version) must not render an empty table here either.
+    elif not section.diffs:
+        # round2 review, Must: no version had both profiles, so nothing at all
+        # was diffed (_diffs_for_group's per-version continue fired every
+        # time) and an empty table here would hide that reason.
         lines.append(
             f"{', '.join(section.scheduler_order)} がどの入力の版でもそろわず、"
             "予測と結果を示せなかった。"
+        )
+    else:
+        # The diff exists but none of it is about the prediction: all_keys is
+        # the wait: / unplaceable_free: subset of section.diffs, so it can be
+        # empty while other metrics (pending_count_at_end, cluster_std, ...)
+        # were diffed fine. That is a different condition from the one above,
+        # and from _render_diff_section's — claiming the versions did not line
+        # up here reported the wrong reason (round3 review, correctness Must 4
+        # / maintainability Must), so this says only what was actually
+        # missing.
+        lines.append(
+            "この ρ の差に、予測の対象になる値（大きな要求を持つタスクの待機時間、"
+            "置けない空き資源の量）が1つも無く、予測と結果を示せなかった。"
         )
     lines.append("")
     return lines
