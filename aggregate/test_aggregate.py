@@ -1363,6 +1363,54 @@ def test_run_skips_a_truncated_record_and_still_succeeds_with_the_rest() -> None
     assert "report.md" in writer.texts
 
 
+def test_run_skips_a_record_with_no_transitions_and_warns(capsys: pytest.CaptureFixture[str]) -> None:
+    # round3 review, correctness Must 2: a record cut off right after its
+    # header parses as complete (truncated is False) but measured nothing, so
+    # its pending_count_at_end of 0 is not a measurement — diffed against a
+    # scheduler that left 4 tasks pending it reported a 4.0000 difference
+    # between the two schedulers that no run ever observed. run() drops such a
+    # record the same way it drops a truncated one, and says so.
+    least = RecordBuilder()
+    for i in range(4):
+        least.create_task(0, f"task-{i}", f"instance-{i}")  # all four stay pending to the end
+    least.create_task(10, "task-placed", "instance-placed")
+    least.bind(10, "task-placed", "instance-placed", "node-1", {"cpu": "1"})
+    header_only = RecordBuilder()  # the write was interrupted right after the header
+    texts = [
+        (Path("a.jsonl"), _run_record_text("LeastAllocated", 1.1, least)),
+        (Path("b.jsonl"), _run_record_text("MostAllocated", 1.1, header_only)),
+    ]
+    writer = FakeReportWriter()
+
+    code = aggregate.run(
+        ["--records-dir", "unused", "--output-dir", "unused"],
+        read_record_texts=lambda _: texts,
+        writer_factory=lambda _: writer,
+    )
+
+    assert code == 0
+    assert "遷移" in capsys.readouterr().err  # the reader is told one record was skipped
+    report = writer.texts["report.md"]
+    assert "1 個のスケジューラ" in report  # only LeastAllocated is left at this ρ
+    assert "pending_count_at_end" not in report.split("### スケジューラの差")[1]
+
+
+def test_run_fails_when_every_record_has_no_transitions() -> None:
+    # round3 review, correctness Must 2: with nothing but header-only records
+    # there is nothing to aggregate, which must be an error rather than an
+    # empty report.
+    header_only = RecordBuilder()
+    texts = [(Path("a.jsonl"), _run_record_text("LeastAllocated", 0.5, header_only))]
+
+    code = aggregate.run(
+        ["--records-dir", "unused", "--output-dir", "unused"],
+        read_record_texts=lambda _: texts,
+        writer_factory=lambda _: FakeReportWriter(),
+    )
+
+    assert code == 1
+
+
 def test_run_fails_when_every_record_is_truncated() -> None:
     least = RecordBuilder()
     least.create_task(0, "task-1", "instance-1")
