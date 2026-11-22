@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-import aggregate  # noqa: E402
+import aggregate
 
 
 def write_record_file(path: Path, header: dict, transitions: list[dict]) -> None:
@@ -202,11 +202,11 @@ class RecordBuilder:
             )
         )
 
-    def register_node(self, time, node_id, capacity: dict[str, str]) -> "RecordBuilder":
+    def register_node(self, time, node_id, capacity: dict[str, str]) -> RecordBuilder:
         self._write(time, "register_node", node_id, state="resource_capacity", after=capacity)
         return self
 
-    def create_task(self, time, task_id, instance_id, cpu="1", memory="0", gpu="0") -> "RecordBuilder":
+    def create_task(self, time, task_id, instance_id, cpu="1", memory="0", gpu="0") -> RecordBuilder:
         immutable = {
             "owner": "u1",
             "group": "g1",
@@ -219,7 +219,7 @@ class RecordBuilder:
         self._write(time, "create_task", instance_id, task_id=task_id, state="assigned_node", after=None)
         return self
 
-    def bind(self, time, task_id, instance_id, node_id, allocated: dict[str, str]) -> "RecordBuilder":
+    def bind(self, time, task_id, instance_id, node_id, allocated: dict[str, str]) -> RecordBuilder:
         self._write(time, "assign_node", instance_id, task_id=task_id, state="assigned_node", after=node_id)
         self._write(time, "assign_node", node_id, task_id=task_id, state="allocated_resource", state_key=instance_id, after=allocated)
         self._write(time, "start", instance_id, task_id=task_id, state="instance_status", before="pending", after="running")

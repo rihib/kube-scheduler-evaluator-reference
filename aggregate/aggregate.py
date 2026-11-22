@@ -20,7 +20,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -726,7 +726,7 @@ def parse_time(value: str) -> float:
     m = _VIRTUAL_TIME_RE.match(value)
     if not m:
         raise ValueError(f"not a virtual time: {value!r}")
-    dt = datetime.strptime(m.group("date"), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    dt = datetime.strptime(m.group("date"), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=UTC)
     seconds = dt.timestamp()
     if m.group("frac"):
         seconds += float(f"0.{m.group('frac')}")
