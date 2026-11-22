@@ -3,6 +3,7 @@ package clusterdata
 import (
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"sort"
 	"strings"
@@ -38,10 +39,10 @@ func BuildInputVersion(
 	seed int64,
 	targetRho, sampleRatio float64,
 ) ([]definition.Event, InputVersionSummary, error) {
-	if sampleRatio < 0 || sampleRatio > 1 {
+	if math.IsNaN(sampleRatio) || sampleRatio < 0 || sampleRatio > 1 {
 		return nil, InputVersionSummary{}, fmt.Errorf("clusterdata: sampleRatio must be between 0 and 1, got %v", sampleRatio)
 	}
-	if targetRho <= 0 {
+	if math.IsNaN(targetRho) || targetRho <= 0 {
 		return nil, InputVersionSummary{}, fmt.Errorf("clusterdata: targetRho must be positive, got %v", targetRho)
 	}
 
