@@ -525,6 +525,25 @@ func TestBuildInputVersion_ErrorsOnZeroSubmissionPeriod(t *testing.T) {
 	}
 }
 
+// 使う Pod があるのに、どのノードもどの資源の容量も0だと、ρ の分母が0に
+// なって求められない。容量が無いことが伝わるエラーで返す。
+func TestBuildInputVersion_ErrorsOnZeroNodeCapacity(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader +
+		"openb-node-0000,0,0,0,\n" +
+		"openb-node-0001,0,0,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for nodes without any capacity")
+	}
+	if !strings.Contains(err.Error(), "no node has any capacity") {
+		t.Errorf("error = %q, want it to say that no node has any capacity", err)
+	}
+}
+
 // 使う Pod があるのに要求量×実行時間の合計がどの資源でも0だと、ρ が
 // 根拠無く0になり、倍率0で投入の間隔がすべて0の入力の版が目標の ρ を
 // 満たしたように見えてしまう。これはエラーで返す。
