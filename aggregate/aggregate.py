@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -597,6 +598,48 @@ def write_report(records: list[RunRecord], writer, rng) -> None:
         writer.write_figure(relpath, fig)
 
 
+def _parse_args(argv: list[str]):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Aggregate experiment 1 transition records into a report.")
+    parser.add_argument("--records-dir", required=True, help="Folder of *.jsonl transition records.")
+    parser.add_argument("--output-dir", required=True, help="Folder to write report.md and figures/ into.")
+    parser.add_argument("--seed", type=int, default=0, help="Seed for the bootstrap CI's random number generator.")
+    return parser.parse_args(argv)
+
+
+def run(argv: list[str], *, read_records=None, writer_factory=FileReportWriter) -> int:
+    """The report command (units/U04.md): reads every record under --records-dir
+    and writes the report under --output-dir. read_records and writer_factory are
+    injected (decisions.md) so tests can pass Fakes; the defaults are the real
+    file-based adapters."""
+    if read_records is None:
+        read_records = read_records_from_folder
+    args = _parse_args(argv)
+
+    try:
+        records = read_records(Path(args.records_dir))
+    except Exception as e:
+        print(f"error: failed to read records from {args.records_dir}: {e}", file=sys.stderr)
+        return 1
+    if not records:
+        print(f"error: no records found in {args.records_dir}", file=sys.stderr)
+        return 1
+
+    rng = np.random.default_rng(args.seed)
+    writer = writer_factory(Path(args.output_dir))
+    try:
+        write_report(records, writer, rng)
+    except Exception as e:
+        print(f"error: failed to write report to {args.output_dir}: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def main() -> None:
+    sys.exit(run(sys.argv[1:]))
+
+
 def read_record_file(path: Path) -> RunRecord:
     """Reads one run's JSONL record file (header line + transition lines)."""
     with path.open() as f:
@@ -693,3 +736,7 @@ def parse_time(value: str) -> float:
         hh, mm = tz[1:].split(":")
         seconds -= sign * (int(hh) * 3600 + int(mm) * 60)
     return seconds
+
+
+if __name__ == "__main__":
+    main()
