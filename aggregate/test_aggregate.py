@@ -122,3 +122,33 @@ def test_read_records_from_folder_reads_every_jsonl_file(tmp_path: Path) -> None
 
     profiles = sorted(r.header.scheduler_profile for r in records)
     assert profiles == ["LeastAllocated", "MostAllocated"]
+
+
+# --- parse_quantity ---
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("0", 0.0),
+        ("4", 4.0),
+        ("500m", 0.5),
+        ("1500m", 1.5),
+        ("1Gi", 1024.0**3),
+        ("2Ki", 2.0 * 1024),
+        ("1G", 1_000_000_000.0),
+    ],
+)
+def test_parse_quantity(value: str, expected: float) -> None:
+    assert aggregate.parse_quantity(value) == pytest.approx(expected)
+
+
+# --- classify_gpu_class ---
+
+
+@pytest.mark.parametrize(
+    "gpu_count,expected_class",
+    [(0, "0"), (1, "1"), (2, "2-4"), (4, "2-4"), (8, "8")],
+)
+def test_classify_gpu_class(gpu_count: int, expected_class: str) -> None:
+    assert aggregate.classify_gpu_class(gpu_count) == expected_class
