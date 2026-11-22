@@ -1011,11 +1011,12 @@ def run(
 
     try:
         texts = read_record_texts(Path(args.records_dir))
-    except OSError as e:
-        # Only a real I/O failure (round2 review, correctness IMO): a bug
-        # inside the adapter itself (TypeError, ...) propagates and crashes
-        # instead of being relabeled as "failed to read records" with no
-        # traceback.
+    except (OSError, UnicodeDecodeError) as e:
+        # Only a real I/O failure or a record file that is not valid UTF-8
+        # (round2 review, correctness IMO; round3 review added the decode
+        # failure, which is a ValueError rather than an OSError): a bug inside
+        # the adapter itself (TypeError, ...) propagates and crashes instead
+        # of being relabeled as "failed to read records" with no traceback.
         print(f"error: failed to read records from {args.records_dir}: {e}", file=sys.stderr)
         return 1
     if not texts:
@@ -1104,6 +1105,14 @@ def parse_record(text: str) -> RunRecord:
         raise ValueError("record is empty after dropping its truncated last line")
 
     lines = [json.loads(line) for line in raw_lines]
+    for i, line in enumerate(lines):
+        if not isinstance(line, dict):
+            # Valid JSON, but not a record line. Checked here so the caller
+            # gets this module's own ValueError, naming the line, instead of a
+            # TypeError from subscripting it further down (round3 review,
+            # correctness IMO: run()'s except does not catch that, so a
+            # corrupt record killed the command without naming its file).
+            raise ValueError(f"line {i + 1} is not a JSON object: {line!r}")
 
     h = lines[0]
     header = RunHeader(
