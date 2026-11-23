@@ -82,5 +82,36 @@ def test_expected_sampled_count_rounds_half_up_like_go() -> None:
     assert run_pilot.expected_sampled_count(eligible=1000, ratio=0.8) == 800
 
 
+# --- check_scenario1 ---
+
+
+def test_check_scenario1_passes_when_used_count_and_rho_match() -> None:
+    summary = run_pilot.BuildInputSummary(used_pods=800, excluded_pods=200, failed_pods=12, rho_before=0.5, rho_after=1.1)
+
+    results = run_pilot.check_scenario1(summary, eligible_pods=1000, ratio=0.8, target_rho=1.1)
+
+    assert all(r.passed for r in results)
+    assert {r.name for r in results} == {"scenario1: used pods is 80% of non-pending pods", "scenario1: achieved rho matches the target"}
+
+
+def test_check_scenario1_fails_when_used_count_is_off() -> None:
+    summary = run_pilot.BuildInputSummary(used_pods=799, excluded_pods=201, failed_pods=12, rho_before=0.5, rho_after=1.1)
+
+    results = run_pilot.check_scenario1(summary, eligible_pods=1000, ratio=0.8, target_rho=1.1)
+
+    used_check = next(r for r in results if r.name == "scenario1: used pods is 80% of non-pending pods")
+    assert used_check.passed is False
+    assert "800" in used_check.detail and "799" in used_check.detail
+
+
+def test_check_scenario1_fails_when_rho_does_not_match_target() -> None:
+    summary = run_pilot.BuildInputSummary(used_pods=800, excluded_pods=200, failed_pods=12, rho_before=0.5, rho_after=1.05)
+
+    results = run_pilot.check_scenario1(summary, eligible_pods=1000, ratio=0.8, target_rho=1.1)
+
+    rho_check = next(r for r in results if r.name == "scenario1: achieved rho matches the target")
+    assert rho_check.passed is False
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

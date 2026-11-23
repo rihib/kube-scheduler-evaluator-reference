@@ -105,3 +105,14 @@ def expected_sampled_count(eligible: int, ratio: float) -> int:
     int(eligible * ratio + 0.5), i.e. round-half-up truncated toward zero,
     the same as Go's int() conversion."""
     return int(eligible * ratio + 0.5)
+
+
+_RHO_TOLERANCE = 1e-6
+
+
+def check_scenario1(summary: BuildInputSummary, *, eligible_pods: int, ratio: float, target_rho: float) -> list[CheckResult]:
+    """spec.md scenario 1's Then: the used-pod count is the sampled 80% of
+    non-Pending pods, and the achieved rho matches the target
+    (units/U05.md's "確かめ方": "使った件数が...80%であること", "求めたρが
+    1.1であること")."""
+    return []
