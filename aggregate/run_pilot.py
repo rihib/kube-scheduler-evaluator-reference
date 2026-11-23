@@ -361,4 +361,21 @@ def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho
     """units/U05.md's "負荷の効き方": for every resource both runs measured,
     the higher rho's allocation_rate is higher than the lower rho's (same
     scheduler profile, since the caller compares matching schedulers)."""
-    return []
+    common = sorted(set(metrics_low_rho.allocation_rate) & set(metrics_high_rho.allocation_rate))
+    if not common:
+        return [
+            CheckResult(
+                name="sanity: rho effect on allocation_rate",
+                passed=False,
+                detail="no resource is measured by both the rho=0.5 and rho=1.1 runs",
+            )
+        ]
+    not_increased = {r: (metrics_low_rho.allocation_rate[r], metrics_high_rho.allocation_rate[r]) for r in common if not metrics_high_rho.allocation_rate[r] > metrics_low_rho.allocation_rate[r]}
+    ok = not not_increased
+    return [
+        CheckResult(
+            name="sanity: rho effect on allocation_rate",
+            passed=ok,
+            detail="ok" if ok else f"allocation_rate did not increase from rho=0.5 to rho=1.1 for: {not_increased}",
+        )
+    ]
