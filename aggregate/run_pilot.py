@@ -238,4 +238,28 @@ def check_scenario5(report_text: str) -> list[CheckResult]:
     """spec.md scenario 5's Then: the ρ = 0.5 section shows the nonzero-wait
     fraction for (at least) two schedulers, and the wait-time diff between
     them (units/U05.md's "確かめ方")."""
-    return []
+    section = _rho_section(report_text, "0.5")
+    has_section = section is not None and "### 陰性対照" in section
+    fraction_block = ""
+    if has_section and "待機時間が0でないPodの割合:" in section:
+        fraction_block = section.split("待機時間が0でないPodの割合:", 1)[1].split("待機時間の差:")[0]
+    scheduler_count = len(re.findall(r"(?m)^- \S+: ", fraction_block))
+    has_two_schedulers = scheduler_count >= 2
+    has_diff = bool(section and "待機時間の差" in section and "wait:" in section)
+    return [
+        CheckResult(
+            name="scenario5: rho = 0.5 has a negative-control section",
+            passed=has_section,
+            detail="ok" if has_section else "no ### 陰性対照 section found under ## ρ = 0.5",
+        ),
+        CheckResult(
+            name="scenario5: at least two schedulers' nonzero-wait fraction is shown",
+            passed=has_two_schedulers,
+            detail="ok" if has_two_schedulers else f"found {scheduler_count} scheduler line(s), expected at least 2",
+        ),
+        CheckResult(
+            name="scenario5: the wait-time diff between schedulers is shown",
+            passed=has_diff,
+            detail="ok" if has_diff else "no 待機時間の差 with a wait: entry found",
+        ),
+    ]
