@@ -81,7 +81,6 @@ func scenarioID(rho float64, p pilotProfile) string {
 // information value, when it carries one. found is false in a "go test"
 // binary, which does not carry a vcs.revision even though nothing is wrong
 // with the build info.
-//
 func referenceCommitFrom(info *debug.BuildInfo) (commit string, found bool) {
 	for _, s := range info.Settings {
 		if s.Key == "vcs.revision" {
