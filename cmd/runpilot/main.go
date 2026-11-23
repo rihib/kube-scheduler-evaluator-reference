@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -73,4 +74,14 @@ func scenarioID(rho float64, p pilotProfile) string {
 	rhoLabel = strings.ReplaceAll(rhoLabel, "-", "neg")
 	rhoLabel = strings.ReplaceAll(rhoLabel, ".", "p")
 	return fmt.Sprintf("rho%s-%s", rhoLabel, strings.ToLower(p.name))
+}
+
+// referenceCommitFrom reports reference's own commit out of one build
+// information value, when it carries one. found is false in a "go test"
+// binary, which does not carry a vcs.revision even though nothing is wrong
+// with the build info.
+//
+// TODO(U03): not yet implemented.
+func referenceCommitFrom(info *debug.BuildInfo) (commit string, found bool) {
+	return "", false
 }

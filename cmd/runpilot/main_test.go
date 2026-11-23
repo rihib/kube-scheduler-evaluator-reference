@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -47,5 +48,24 @@ func TestScenarioID_DiffersByRhoAndProfile(t *testing.T) {
 	}
 	if len(ids) != 4 {
 		t.Errorf("distinct scenario ids = %d, want 4: %v", len(ids), ids)
+	}
+}
+
+// ビルド情報に vcs.revision があれば、それを reference のコミットとして使う。
+func TestReferenceCommitFrom_UsesVCSRevisionWhenPresent(t *testing.T) {
+	commit, found := referenceCommitFrom(&debug.BuildInfo{
+		Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "abc123"}},
+	})
+	if !found || commit != "abc123" {
+		t.Errorf("got (%q, %v), want (\"abc123\", true)", commit, found)
+	}
+}
+
+// vcs.revision が無ければ（go test のバイナリなど）、呼び出し元が git に
+// フォールバックできるよう found = false を返す。
+func TestReferenceCommitFrom_ReportsNotFoundWithoutVCSRevision(t *testing.T) {
+	commit, found := referenceCommitFrom(&debug.BuildInfo{})
+	if found {
+		t.Errorf("got (%q, true), want found = false so the caller falls back to git", commit)
 	}
 }
