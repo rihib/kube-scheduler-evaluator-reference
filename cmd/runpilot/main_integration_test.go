@@ -187,3 +187,24 @@ func TestReferenceCommit_MarksDirtyWhenGitTreeIsDirty(t *testing.T) {
 		t.Errorf("commit = %q, want %q", commit, head+"-dirty")
 	}
 }
+
+// 同じ経路で、HEAD は取れても作業ツリーが汚れているかを git に聞けなかったら、
+// クリーンな木と決めつけずに失敗する。"-dirty" の付かないコミットは、実際に
+// 動いたツリーがコミットと同じだという主張だからである。
+func TestReferenceCommit_FailsWhenGitCannotTellWhetherTreeIsDirty(t *testing.T) {
+	dir, _ := initTempGitRepo(t)
+	// .git/index の中身を壊すと、git status --porcelain だけが失敗し
+	// （index file smaller than expected）、git rev-parse HEAD は成功する。
+	// 権限ではなく中身を壊すので、root で流しても同じになる。
+	if err := os.WriteFile(filepath.Join(dir, ".git", "index"), []byte("garbage-not-an-index"), 0o644); err != nil {
+		t.Fatalf("failed to corrupt .git/index: %v", err)
+	}
+
+	commit, err := referenceCommit()
+	if err == nil {
+		t.Fatalf("referenceCommit() = %q, want an error", commit)
+	}
+	if !strings.Contains(err.Error(), "git rev-parse HEAD succeeded") {
+		t.Errorf("error = %q, want it to say that git rev-parse HEAD succeeded", err)
+	}
+}
