@@ -66,4 +66,23 @@ def parse_buildinput_summary(text: str) -> BuildInputSummary:
     BuildInputSummary. Raises ValueError naming the missing field(s) if the
     text does not carry every field buildinput's run() always prints on
     success — a sign the text is not what buildinput actually printed."""
-    return BuildInputSummary(used_pods=0, excluded_pods=0, failed_pods=0, rho_before=0.0, rho_after=0.0)
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, _, raw = line.partition(":")
+        key = key.strip()
+        if key in _BUILDINPUT_FIELDS:
+            values[key] = raw.strip()
+
+    missing = [key for key in _BUILDINPUT_FIELDS if key not in values]
+    if missing:
+        raise ValueError(f"buildinput summary is missing field(s): {', '.join(missing)}")
+
+    return BuildInputSummary(
+        used_pods=int(values["used pods"]),
+        excluded_pods=int(values["excluded pods"]),
+        failed_pods=int(values["failed pods"]),
+        rho_before=float(values["rho (before)"]),
+        rho_after=float(values["rho (after)"]),
+    )
