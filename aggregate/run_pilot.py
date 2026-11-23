@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 import sys
 from collections.abc import Sequence
@@ -323,4 +324,34 @@ def check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int)
 def check_sanity_ranges(metrics: aggregate.Metrics) -> list[CheckResult]:
     """units/U05.md's "値の範囲": wait times and unplaceable_free are >= 0,
     allocation_rate is within [0, 1], and no metric is NaN."""
-    return []
+    all_waits = [w for waits in metrics.pending_wait_by_class.values() for w in waits]
+    waits_ok = all(w >= 0 for w in all_waits)
+    allocation_ok = all(0.0 <= v <= 1.0 for v in metrics.allocation_rate.values())
+    unplaceable_ok = all(v >= 0 for v in metrics.unplaceable_free.values())
+
+    scalar_values = [metrics.cluster_std, metrics.nonzero_wait_fraction, *metrics.allocation_rate.values(), *metrics.unplaceable_free.values(), *all_waits]
+    nan_values = [v for v in scalar_values if v is not None and math.isnan(v)]
+    nan_ok = not nan_values
+
+    return [
+        CheckResult(
+            name="sanity: pending wait times are >= 0",
+            passed=waits_ok,
+            detail="ok" if waits_ok else f"negative wait time(s) found: {[w for w in all_waits if w < 0]}",
+        ),
+        CheckResult(
+            name="sanity: allocation_rate is within [0, 1]",
+            passed=allocation_ok,
+            detail="ok" if allocation_ok else f"allocation_rate out of range: {metrics.allocation_rate}",
+        ),
+        CheckResult(
+            name="sanity: unplaceable_free is >= 0",
+            passed=unplaceable_ok,
+            detail="ok" if unplaceable_ok else f"negative unplaceable_free: {metrics.unplaceable_free}",
+        ),
+        CheckResult(
+            name="sanity: no metric is NaN",
+            passed=nan_ok,
+            detail="ok" if nan_ok else f"found {len(nan_values)} NaN value(s)",
+        ),
+    ]
