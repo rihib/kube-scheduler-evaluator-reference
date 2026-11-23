@@ -6,8 +6,11 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/pfnet/kube-scheduler-evaluator/cmd/evaluator"
 )
@@ -35,8 +38,22 @@ func run(
 }
 
 // parseRhos splits a comma-separated list of target rho values.
-//
-// TODO(U03): not yet implemented.
 func parseRhos(s string) ([]float64, error) {
-	return nil, nil
+	parts := strings.Split(s, ",")
+	rhos := make([]float64, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		v, err := strconv.ParseFloat(part, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --rhos value %q: %w", part, err)
+		}
+		rhos = append(rhos, v)
+	}
+	if len(rhos) == 0 {
+		return nil, fmt.Errorf("--rhos must list at least one value, got %q", s)
+	}
+	return rhos, nil
 }
