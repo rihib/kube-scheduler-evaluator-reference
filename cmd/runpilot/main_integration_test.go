@@ -156,9 +156,9 @@ func initTempGitRepo(t *testing.T) (dir, headCommit string) {
 	return dir, strings.TrimSpace(string(out))
 }
 
-// 本物の git に問い合わせる経路（ビルド情報に vcs.revision が無い、go run や
-// Makefile のビルドという普段の動かし方で通る経路）で、作業ツリーがコミットと
-// 同じなら、記録の1行目のコミットは HEAD をそのまま名乗る。
+// 本物の git に問い合わせる経路（ビルド情報に vcs.revision が無い、
+// "go run ./cmd/runpilot" という普段の動かし方で通る経路）で、作業ツリーが
+// コミットと同じなら、記録の1行目のコミットは HEAD をそのまま名乗る。
 func TestReferenceCommit_UsesGitHeadWhenTreeIsClean(t *testing.T) {
 	_, head := initTempGitRepo(t)
 

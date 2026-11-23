@@ -270,10 +270,9 @@ func referenceCommitFrom(info *debug.BuildInfo) (commit string, found bool) {
 // for whether the working tree is dirty, in which case "-dirty" is appended
 // just as referenceCommitFrom does for a dirty build. Git is asked whenever
 // build info carries no vcs.revision, which is the normal case for how this
-// pilot is run ("go run ./cmd/runpilot", and the Makefile's "go build -o
-// bin/... cmd/main.go": only passing a package path to "go build" embeds vcs
-// information), so this is the path that usually decides whether the
-// record's header names a dirty tree.
+// pilot is run ("go run ./cmd/runpilot": only passing a package path to "go
+// build" embeds vcs information), so this is the path that usually decides
+// whether the record's header names a dirty tree.
 func referenceCommitFromGit(revParseOut, statusOut string) string {
 	commit := strings.TrimSpace(revParseOut)
 	if strings.TrimSpace(statusOut) != "" {
@@ -286,9 +285,9 @@ func referenceCommitFromGit(revParseOut, statusOut string) string {
 // record.EvaluatorCommit does for the evaluator module: build info's
 // vcs.revision when available, falling back to asking git directly when it
 // is not. Only passing a package path to "go build" embeds vcs information,
-// so the git fallback covers more than a "go test" binary: "go run
-// ./cmd/runpilot" and the Makefile's "go build -o bin/... cmd/main.go" take
-// it too.
+// so the git fallback is the path this pilot takes when run the normal way,
+// with "go run ./cmd/runpilot"; a "go test" binary of this package takes it
+// too.
 func referenceCommit() (string, error) {
 	if info, ok := debug.ReadBuildInfo(); ok {
 		if commit, found := referenceCommitFrom(info); found {
