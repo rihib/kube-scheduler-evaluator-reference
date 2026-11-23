@@ -664,5 +664,56 @@ def test_format_results_marks_each_result_pass_or_fail_with_its_detail() -> None
     assert "[FAIL] b: went wrong" in text
 
 
+# --- run (integration) ---
+
+_TINY_NODE_CSV = "sn,cpu_milli,memory_mib,gpu,model\nnode-1,4000,8192,0,\n"
+_TINY_POD_CSV = (
+    POD_CSV_HEADER
+    + "pod-1,100,100,0,0,,BestEffort,Running,1000,1010,1000\n"
+    + "pod-2,100,100,0,0,,BestEffort,Running,1050,1070,1050\n"
+    + "pod-3,100,100,0,0,,BestEffort,Failed,1100,1110,1100\n"
+    + "pod-4,100,100,0,0,,BestEffort,Running,1150,1160,1150\n"
+    + "pod-5,100,100,0,0,,BestEffort,Pending,1200,0,\n"
+)
+
+
+@pytest.mark.integration
+def test_run_builds_records_and_report_from_a_tiny_openb_style_csv(tmp_path: Path) -> None:
+    # Exercises the whole wiring (go run ./cmd/buildinput x2, go run
+    # ./cmd/runpilot, aggregate.run in-process) against a tiny hand-built
+    # input, the same kind of fast dry run units/U05.md's "着手時に決める
+    # こと" calls for before scaling up to the full openb trace. This only
+    # checks that the pipeline produces its files without crashing; whether
+    # every Then and sanity check actually *passes* needs real openb-scale
+    # data (too few pods here to show a real rho or scheduler effect).
+    nodes_csv = tmp_path / "nodes.csv"
+    # cmd/runpilot requires --pods' file name to start with "openb" (it reads
+    # the trace version from it); a plainly-named "pods.csv" fails that check.
+    pods_csv = tmp_path / "openb_pod_list_test.csv"
+    nodes_csv.write_text(_TINY_NODE_CSV)
+    pods_csv.write_text(_TINY_POD_CSV)
+    out_dir = tmp_path / "out"
+
+    exit_code = run_pilot.run(
+        [
+            "--nodes",
+            str(nodes_csv),
+            "--pods",
+            str(pods_csv),
+            "--seed",
+            "1",
+            "--ratio",
+            "1.0",
+            "--out",
+            str(out_dir),
+        ]
+    )
+
+    assert isinstance(exit_code, int)
+    record_files = list((out_dir / "records").glob("*.jsonl"))
+    assert len(record_files) == 4
+    assert (out_dir / "report" / "report.md").exists()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
