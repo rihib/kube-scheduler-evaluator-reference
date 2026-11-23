@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +35,7 @@ import (
 const traceName = "openb"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, nil, nil))
+	os.Exit(run(os.Args[1:], os.Stderr, nil, nil))
 }
 
 // run parses args in the same shape as the real command line, builds one
@@ -46,7 +47,7 @@ func main() {
 // reference のコミットを取るものを外から受け取る"); nil selects their real
 // implementations.
 func run(
-	args []string, stdout, stderr io.Writer,
+	args []string, stderr io.Writer,
 	recordWriterFactory evaluator.RecordWriterFactory,
 	referenceCommitProvider func() (string, error),
 ) int {
@@ -67,6 +68,10 @@ func run(
 	rhos, err := parseRhos(*rhosFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		return 2
+	}
+	if *iterations < 1 {
+		fmt.Fprintf(stderr, "runpilot: --iterations must be at least 1, got %d\n", *iterations)
 		return 2
 	}
 
@@ -90,19 +95,36 @@ func run(
 		fmt.Fprintf(stderr, "runpilot: failed to get reference commit: %v\n", err)
 		return 1
 	}
+	// The pods CSV's file name (minus extension) is treated as the trace's
+	// version (e.g. "openb_pod_list_default"), so it must name the openb
+	// trace this pilot only supports; a CSV from another trace would
+	// otherwise make the record's header lie about which trace it ran.
 	traceVersion := strings.TrimSuffix(filepath.Base(*podsPath), ".csv")
+	if !strings.HasPrefix(traceVersion, traceName) {
+		fmt.Fprintf(stderr, "runpilot: --pods file name %q does not start with the %s trace name; this pilot only supports the %s trace\n", traceVersion, traceName, traceName)
+		return 2
+	}
 
-	scenarios, err := pilotScenarios(nodesCSV, podsCSV, *seed, *sampleRatio, rhos, *iterations, traceVersion, refCommit)
+	scenarios, err := pilotScenarios(nodesCSV, podsCSV, pilotOptions{
+		Seed:            *seed,
+		SampleRatio:     *sampleRatio,
+		Rhos:            rhos,
+		Iterations:      *iterations,
+		TraceVersion:    traceVersion,
+		ReferenceCommit: refCommit,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "runpilot: %v\n", err)
 		return 1
 	}
 
-	var cfgOpts []evaluator.ConfigOption
+	// evaluator.WithRecordWriterFactory takes priority over
+	// WithRecordOutputDir (cmd/evaluator/evaluator.go's
+	// resolvedRecordWriterFactory), so WithRecordOutputDir can always be set
+	// and only overridden by a test's Fake factory.
+	cfgOpts := []evaluator.ConfigOption{evaluator.WithRecordOutputDir(*outDir)}
 	if recordWriterFactory != nil {
 		cfgOpts = append(cfgOpts, evaluator.WithRecordWriterFactory(recordWriterFactory))
-	} else {
-		cfgOpts = append(cfgOpts, evaluator.WithRecordOutputDir(*outDir))
 	}
 
 	eval, err := evaluator.New(
@@ -123,38 +145,46 @@ func run(
 	return eval.Run(context.Background())
 }
 
+// pilotOptions groups the flag values pilotScenarios needs, instead of
+// taking them as separate parameters (several of which share a type and so
+// could otherwise be swapped at a call site without a compile error).
+type pilotOptions struct {
+	Seed            int64
+	SampleRatio     float64
+	Rhos            []float64
+	Iterations      int
+	TraceVersion    string
+	ReferenceCommit string
+}
+
 // pilotScenarios builds one definition.Scenario per (rho, profile) pair: the
 // input version for rho is built once (units/U03.md: "U02 で作った入力の版を、
 // そのまま evaluator のシナリオとして使う") and its events are reused by both
 // profiles' scenarios, since a scenario's generator only reads the slice.
-func pilotScenarios(
-	nodesCSV, podsCSV []byte,
-	seed int64, sampleRatio float64, rhos []float64, iterations int,
-	traceVersion, referenceCommit string,
-) ([]definition.Scenario, error) {
+func pilotScenarios(nodesCSV, podsCSV []byte, opts pilotOptions) ([]definition.Scenario, error) {
 	var scenarios []definition.Scenario
-	for _, rho := range rhos {
+	for _, rho := range opts.Rhos {
 		events, _, err := clusterdata.BuildInputVersion(
-			bytes.NewReader(nodesCSV), bytes.NewReader(podsCSV), seed, rho, sampleRatio,
+			bytes.NewReader(nodesCSV), bytes.NewReader(podsCSV), opts.Seed, rho, opts.SampleRatio,
 		)
 		if err != nil {
 			return nil, err
 		}
-		for _, p := range pilotProfiles {
-			schedulerProfile, err := kubeSchedulerProfile(p)
+		for _, strategy := range pilotStrategies {
+			schedulerProfile, err := kubeSchedulerProfile(strategy)
 			if err != nil {
 				return nil, err
 			}
 			identity := definition.RunIdentity{
 				TraceName:        traceName,
-				TraceVersion:     traceVersion,
-				ReferenceCommit:  referenceCommit,
-				InputSeed:        strconv.FormatInt(seed, 10),
+				TraceVersion:     opts.TraceVersion,
+				ReferenceCommit:  opts.ReferenceCommit,
+				InputSeed:        strconv.FormatInt(opts.Seed, 10),
 				Rho:              rho,
-				SchedulerProfile: profileDescription(p),
+				SchedulerProfile: profileDescription(strategy),
 			}
 			scenarios = append(scenarios, evaluator.WithScenario(
-				scenarioID(rho, p), iterations, eventsGenerator(events), nil, identity,
+				scenarioID(rho, strategy), opts.Iterations, eventsGenerator(events), nil, identity,
 				scheduler.WithProfiles(schedulerProfile),
 			))
 		}
@@ -172,7 +202,11 @@ func eventsGenerator(events []definition.Event) func(chan<- definition.Event) {
 	}
 }
 
-// parseRhos splits a comma-separated list of target rho values.
+// parseRhos splits a comma-separated list of target rho values. ±Inf and NaN
+// are rejected even though strconv.ParseFloat accepts them: clusterdata.BuildInputVersion
+// only rejects NaN and non-positive values, so +Inf would reach
+// definition.NewScenario by way of scenarioID and make it panic on an ID
+// containing "+Inf".
 func parseRhos(s string) ([]float64, error) {
 	parts := strings.Split(s, ",")
 	rhos := make([]float64, 0, len(parts))
@@ -185,6 +219,9 @@ func parseRhos(s string) ([]float64, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid --rhos value %q: %w", part, err)
 		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("--rhos value %q must be a finite number", part)
+		}
 		rhos = append(rhos, v)
 	}
 	if len(rhos) == 0 {
@@ -193,48 +230,52 @@ func parseRhos(s string) ([]float64, error) {
 	return rhos, nil
 }
 
-// pilotProfile is one of the two scheduler profiles compared in experiment1's
-// pilot (units/U03.md Implementation Decisions: "2つの profile を作る").
-type pilotProfile struct {
-	name     string
-	strategy schedulerconfig.ScoringStrategyType
+// pilotStrategies are the NodeResourcesFit scoring strategies behind the two
+// scheduler profiles every rho is run against (units/U03.md Implementation
+// Decisions: "2つの profile を作る"). Both profiles score NodeResourcesFit by
+// cpu, memory and nvidia.com/gpu with weight 1, and disable
+// NodeResourcesBalancedAllocation's score so the scoring strategy is the only
+// thing that differs between them; every other plugin (filtering included)
+// is left at its default (units/U03.md).
+var pilotStrategies = []schedulerconfig.ScoringStrategyType{
+	schedulerconfig.LeastAllocated,
+	schedulerconfig.MostAllocated,
 }
 
-// pilotProfiles are the two profiles every rho is run against. Both score
-// NodeResourcesFit by cpu, memory and nvidia.com/gpu with weight 1, and
-// disable NodeResourcesBalancedAllocation's score so NodeResourcesFit's
-// scoring strategy is the only thing that differs between them; every other
-// plugin (filtering included) is left at its default (units/U03.md).
-var pilotProfiles = []pilotProfile{
-	{name: "LeastAllocated", strategy: schedulerconfig.LeastAllocated},
-	{name: "MostAllocated", strategy: schedulerconfig.MostAllocated},
-}
-
-// kubeSchedulerProfile builds the scheduler profile config for one
-// pilotProfile, starting from the scheduler's own defaulted profile
+// kubeSchedulerProfile builds the scheduler profile config for one of
+// pilotStrategies, starting from the scheduler's own defaulted profile
 // (latest.Default(), the same defaulting a KubeSchedulerConfiguration file
 // goes through) so every plugin this pilot does not care about - including
 // the single-plugin extension points such as QueueSort - keeps its default
 // instead of being left empty. It only disables NodeResourcesBalancedAllocation's
 // score and replaces NodeResourcesFit's scoring strategy args (units/U03.md:
-// "ほかの採点は既定のまま残す").
-func kubeSchedulerProfile(p pilotProfile) (schedulerconfig.KubeSchedulerProfile, error) {
+// "ほかの採点は既定のまま残す"). It fails instead of silently leaving the
+// default scoring strategy in place if the default profile ever stops
+// carrying a NodeResourcesFit PluginConfig to replace.
+func kubeSchedulerProfile(strategy schedulerconfig.ScoringStrategyType) (schedulerconfig.KubeSchedulerProfile, error) {
 	cfg, err := latest.Default()
 	if err != nil {
 		return schedulerconfig.KubeSchedulerProfile{}, fmt.Errorf("failed to build the default scheduler profile: %w", err)
 	}
 	profile := *cfg.Profiles[0].DeepCopy()
-	profile.Plugins.MultiPoint.Disabled = append(
-		profile.Plugins.MultiPoint.Disabled,
+	// Plugins.Score.Disabled, not Plugins.MultiPoint.Disabled: expandMultiPointPlugins
+	// (k8s.io/kubernetes/pkg/scheduler/framework/runtime) builds each
+	// extension point's disabled set from that extension point's own
+	// Disabled list; MultiPoint.Disabled is only consulted by the v1
+	// defaulting latest.Default() already ran, so appending to it here
+	// would be silently ignored.
+	profile.Plugins.Score.Disabled = append(
+		profile.Plugins.Score.Disabled,
 		schedulerconfig.Plugin{Name: names.NodeResourcesBalancedAllocation},
 	)
+	configuredFit := false
 	for i, pc := range profile.PluginConfig {
 		if pc.Name != names.NodeResourcesFit {
 			continue
 		}
 		profile.PluginConfig[i].Args = &schedulerconfig.NodeResourcesFitArgs{
 			ScoringStrategy: &schedulerconfig.ScoringStrategy{
-				Type: p.strategy,
+				Type: strategy,
 				Resources: []schedulerconfig.ResourceSpec{
 					{Name: "cpu", Weight: 1},
 					{Name: "memory", Weight: 1},
@@ -242,16 +283,20 @@ func kubeSchedulerProfile(p pilotProfile) (schedulerconfig.KubeSchedulerProfile,
 				},
 			},
 		}
+		configuredFit = true
+	}
+	if !configuredFit {
+		return schedulerconfig.KubeSchedulerProfile{}, fmt.Errorf("the default scheduler profile has no %s plugin config to replace", names.NodeResourcesFit)
 	}
 	return profile, nil
 }
 
-// profileDescription is the human-readable description of p written to the
-// transition record's header (definition.RunIdentity.SchedulerProfile).
-func profileDescription(p pilotProfile) string {
+// profileDescription is the human-readable description of strategy written
+// to the transition record's header (definition.RunIdentity.SchedulerProfile).
+func profileDescription(strategy schedulerconfig.ScoringStrategyType) string {
 	return fmt.Sprintf(
 		"NodeResourcesFit(scoringStrategy=%s, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled",
-		p.strategy,
+		strategy,
 	)
 }
 
@@ -259,24 +304,36 @@ func profileDescription(p pilotProfile) string {
 // definition.NewScenario requires an ID matching ^[a-zA-Z][a-zA-Z0-9-]*$, so
 // rho's decimal point is replaced with "p" (and a leading minus, which rho
 // never has in practice, with "neg" so the id still starts with a letter).
-func scenarioID(rho float64, p pilotProfile) string {
+func scenarioID(rho float64, strategy schedulerconfig.ScoringStrategyType) string {
 	rhoLabel := strconv.FormatFloat(rho, 'f', -1, 64)
 	rhoLabel = strings.ReplaceAll(rhoLabel, "-", "neg")
 	rhoLabel = strings.ReplaceAll(rhoLabel, ".", "p")
-	return fmt.Sprintf("rho%s-%s", rhoLabel, strings.ToLower(p.name))
+	return fmt.Sprintf("rho%s-%s", rhoLabel, strings.ToLower(string(strategy)))
 }
 
 // referenceCommitFrom reports reference's own commit out of one build
 // information value, when it carries one. found is false in a "go test"
 // binary, which does not carry a vcs.revision even though nothing is wrong
-// with the build info.
+// with the build info. When the build was made from a dirty working tree
+// (vcs.modified), "-dirty" is appended so the record's header does not name
+// a commit whose tree does not match what actually ran.
 func referenceCommitFrom(info *debug.BuildInfo) (commit string, found bool) {
+	var modified bool
 	for _, s := range info.Settings {
-		if s.Key == "vcs.revision" {
-			return s.Value, true
+		switch s.Key {
+		case "vcs.revision":
+			commit, found = s.Value, true
+		case "vcs.modified":
+			modified = s.Value == "true"
 		}
 	}
-	return "", false
+	if !found {
+		return "", false
+	}
+	if modified {
+		commit += "-dirty"
+	}
+	return commit, true
 }
 
 // referenceCommit returns reference's own commit, the same way

@@ -2,16 +2,26 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/pfnet/kube-scheduler-evaluator/cmd/evaluator"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes/fake"
+	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
+	internalcache "k8s.io/kubernetes/pkg/scheduler/backend/cache"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
+	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
+	schedmetrics "k8s.io/kubernetes/pkg/scheduler/metrics"
 )
 
 // --rhos はカンマ区切りの目標ρの一覧を、前後の空白を落として float64 の列にする。
@@ -33,18 +43,24 @@ func TestParseRhos_FailsOnInvalidValue(t *testing.T) {
 	}
 }
 
+// strconv.ParseFloat は "+Inf" を読めてしまうが、+Inf はscenarioIDを経て
+// definition.NewScenario のIDの正規表現チェックで panic するので、境界で
+// 弾く。
+func TestParseRhos_FailsOnInfinity(t *testing.T) {
+	if _, err := parseRhos("0.5,+Inf"); err == nil {
+		t.Fatalf("parseRhos: expected an error, got nil")
+	}
+}
+
 // シナリオIDは、ρと profile の組ごとに違う値になり、小数点を含まない
 // （definition.NewScenario が要求する ^[a-zA-Z][a-zA-Z0-9-]*$ を満たすため）。
 func TestScenarioID_DiffersByRhoAndProfile(t *testing.T) {
-	least := pilotProfile{name: "LeastAllocated"}
-	most := pilotProfile{name: "MostAllocated"}
-
 	ids := map[string]bool{}
 	for _, id := range []string{
-		scenarioID(0.5, least),
-		scenarioID(0.5, most),
-		scenarioID(1.1, least),
-		scenarioID(1.1, most),
+		scenarioID(0.5, schedulerconfig.LeastAllocated),
+		scenarioID(0.5, schedulerconfig.MostAllocated),
+		scenarioID(1.1, schedulerconfig.LeastAllocated),
+		scenarioID(1.1, schedulerconfig.MostAllocated),
 	} {
 		if strings.Contains(id, ".") {
 			t.Errorf("scenarioID = %q, must not contain a dot", id)
@@ -78,8 +94,116 @@ func TestReferenceCommitFrom_ReportsNotFoundWithoutVCSRevision(t *testing.T) {
 	}
 }
 
+// vcs.modified が true なら、汚れた作業ツリーから作られたバイナリだと分かる
+// よう、コミットに "-dirty" を付ける。
+func TestReferenceCommitFrom_MarksDirtyWhenVCSModified(t *testing.T) {
+	commit, found := referenceCommitFrom(&debug.BuildInfo{
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "abc123"},
+			{Key: "vcs.modified", Value: "true"},
+		},
+	})
+	if !found || commit != "abc123-dirty" {
+		t.Errorf("got (%q, %v), want (\"abc123-dirty\", true)", commit, found)
+	}
+}
+
+// expandedPlugins reports the plugins frameworkruntime would actually run
+// for profile at every extension point, the same way scheduler.New does
+// internally (framework's expandMultiPointPlugins). This is the only way to
+// tell whether a change to profile.Plugins actually takes effect: in the
+// scheduler config types, MultiPoint.Disabled looks like it should disable a
+// plugin at every extension point but is silently ignored once
+// latest.Default() has already run (expandMultiPointPlugins reads each
+// extension point's own Disabled list instead), while e.g. Score.Disabled
+// works; and a plugin can be in effect (e.g. the default QueueSort plugin)
+// without profile.Plugins listing it explicitly at all, since the default
+// profile only lists plugins it overrides.
+func expandedPlugins(t *testing.T, profile schedulerconfig.KubeSchedulerProfile) *schedulerconfig.Plugins {
+	t.Helper()
+	schedmetrics.Register()
+	client := fake.NewSimpleClientset()
+	informerFactory := informers.NewSharedInformerFactory(client, 0)
+	f, err := frameworkruntime.NewFramework(context.Background(), plugins.NewInTreeRegistry(), &profile,
+		frameworkruntime.WithClientSet(client),
+		frameworkruntime.WithInformerFactory(informerFactory),
+		frameworkruntime.WithSnapshotSharedLister(internalcache.NewSnapshot(nil, nil)),
+	)
+	if err != nil {
+		t.Fatalf("frameworkruntime.NewFramework: %v", err)
+	}
+	return f.ListPlugins()
+}
+
+func pluginNames(set schedulerconfig.PluginSet) []string {
+	names := make([]string, len(set.Enabled))
+	for i, p := range set.Enabled {
+		names[i] = p.Name
+	}
+	return names
+}
+
+// kubeSchedulerProfile の返り値は、2つの方式がNodeResourcesFitの
+// ScoringStrategyに入り、資源がcpu・memory・nvidia.com/gpuの重み1になり、
+// NodeResourcesBalancedAllocationが実際に（frameworkruntimeが読む形で）
+// 無効になり、QueueSortなど確認していない拡張点は既定のまま残る。
+func TestKubeSchedulerProfile_ConfiguresScoringAndDisablesBalancedAllocation(t *testing.T) {
+	for _, strategy := range []schedulerconfig.ScoringStrategyType{schedulerconfig.LeastAllocated, schedulerconfig.MostAllocated} {
+		t.Run(string(strategy), func(t *testing.T) {
+			profile, err := kubeSchedulerProfile(strategy)
+			if err != nil {
+				t.Fatalf("kubeSchedulerProfile: %v", err)
+			}
+
+			var fitArgs *schedulerconfig.NodeResourcesFitArgs
+			for _, pc := range profile.PluginConfig {
+				if pc.Name == names.NodeResourcesFit {
+					fitArgs = pc.Args.(*schedulerconfig.NodeResourcesFitArgs)
+				}
+			}
+			if fitArgs == nil {
+				t.Fatalf("profile has no %s plugin config", names.NodeResourcesFit)
+			}
+			if fitArgs.ScoringStrategy.Type != strategy {
+				t.Errorf("ScoringStrategy.Type = %q, want %q", fitArgs.ScoringStrategy.Type, strategy)
+			}
+			wantResources := map[string]int64{"cpu": 1, "memory": 1, "nvidia.com/gpu": 1}
+			gotResources := map[string]int64{}
+			for _, r := range fitArgs.ScoringStrategy.Resources {
+				gotResources[r.Name] = r.Weight
+			}
+			if !reflect.DeepEqual(gotResources, wantResources) {
+				t.Errorf("ScoringStrategy.Resources = %v, want %v", gotResources, wantResources)
+			}
+
+			expanded := expandedPlugins(t, profile)
+			enabledScore := pluginNames(expanded.Score)
+			foundFit := false
+			for _, name := range enabledScore {
+				if name == names.NodeResourcesBalancedAllocation {
+					t.Errorf("enabled Score plugins = %v, must not contain %s", enabledScore, names.NodeResourcesBalancedAllocation)
+				}
+				if name == names.NodeResourcesFit {
+					foundFit = true
+				}
+			}
+			if !foundFit {
+				t.Errorf("enabled Score plugins = %v, want it to contain %s", enabledScore, names.NodeResourcesFit)
+			}
+			if len(pluginNames(expanded.QueueSort)) == 0 {
+				t.Errorf("no QueueSort plugin is enabled, want the default profile's queue sort plugin to survive untouched")
+			}
+		})
+	}
+}
+
 const pilotTestNodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
 	"openb-node-0000,32000,262144,0,\n"
+
+// The pods CSV's file name (minus ".csv") becomes definition.RunIdentity.TraceVersion
+// (main.go's traceVersion), which must start with traceName ("openb"); the
+// file is therefore named openb_pod_list_test.csv rather than pods.csv.
+const pilotTestPodsFile = "openb_pod_list_test.csv"
 
 const pilotTestPodsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n" +
 	"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n" +
@@ -97,27 +221,41 @@ func writeTempCSV(t *testing.T, name, content string) string {
 
 // fakeRecordStore stands in for where runs' records are written
 // (units/U03.md: "記録の書き出し先と reference のコミットに Fake を渡す")。
-// It keeps each run's header (its first WriteLine call) as parsed JSON, so
-// a test can tell runs apart by what combination they belong to.
+// It keeps each run's header (its first WriteLine call) as parsed JSON and
+// counts the transitions written after it, so a test can tell runs apart by
+// what combination they belong to and notice a run that recorded no
+// transitions at all.
 type fakeRecordStore struct {
-	mu      sync.Mutex
-	headers []map[string]any
+	mu   sync.Mutex
+	runs []*fakeRun
+}
+
+// fakeRun is one run's header, how many transition lines followed it, and
+// which nodes pods actually got assigned to (internal/record.Transition's
+// operation == "assign_node" && state == "assigned_node" rows, keyed by
+// their "after" value). assignedNodes only records how many distinct nodes
+// were used, never which ones, since kube-scheduler breaks ties between
+// equally-scored nodes at random (testing.md: "配置先のノード名を確かめない")。
+type fakeRun struct {
+	header          map[string]any
+	transitionLines int
+	assignedNodes   map[string]bool
 }
 
 func (s *fakeRecordStore) factory(evaluator.RecordRunInfo) (evaluator.RecordWriter, error) {
-	return &fakeRecordWriter{store: s}, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run := &fakeRun{assignedNodes: map[string]bool{}}
+	s.runs = append(s.runs, run)
+	return &fakeRecordWriter{run: run}, nil
 }
 
 type fakeRecordWriter struct {
-	store       *fakeRecordStore
+	run         *fakeRun
 	wroteHeader bool
 }
 
 func (w *fakeRecordWriter) WriteLine(v any) error {
-	if w.wroteHeader {
-		return nil
-	}
-	w.wroteHeader = true
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -126,9 +264,17 @@ func (w *fakeRecordWriter) WriteLine(v any) error {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return err
 	}
-	w.store.mu.Lock()
-	w.store.headers = append(w.store.headers, m)
-	w.store.mu.Unlock()
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.run.header = m
+		return nil
+	}
+	w.run.transitionLines++
+	if m["operation"] == "assign_node" && m["state"] == "assigned_node" {
+		if after, ok := m["after"].(string); ok && after != "" {
+			w.run.assignedNodes[after] = true
+		}
+	}
 	return nil
 }
 
@@ -136,7 +282,7 @@ func (w *fakeRecordWriter) Close() error { return nil }
 
 // comboKey labels a header by its (rho, scheduler profile) combination,
 // collapsing the profile's full description down to which of the two
-// pilotProfiles it names.
+// pilotStrategies it names.
 func comboKey(t *testing.T, header map[string]any) string {
 	t.Helper()
 	input, _ := header["input"].(map[string]any)
@@ -145,27 +291,35 @@ func comboKey(t *testing.T, header map[string]any) string {
 		t.Fatalf("header is missing input or scheduler: %v", header)
 	}
 	profile, _ := sched["profile"].(string)
-	var label string
+	return fmt.Sprintf("%v-%s", input["rho"], profileLabel(t, profile))
+}
+
+// profileLabel picks out which of the two pilot profiles a header's
+// scheduler.profile description belongs to, by substring (units/U03.md's
+// description is a full sentence, not a bare name).
+func profileLabel(t *testing.T, description string) string {
+	t.Helper()
 	switch {
-	case strings.Contains(profile, "LeastAllocated"):
-		label = "LeastAllocated"
-	case strings.Contains(profile, "MostAllocated"):
-		label = "MostAllocated"
+	case strings.Contains(description, "LeastAllocated"):
+		return "LeastAllocated"
+	case strings.Contains(description, "MostAllocated"):
+		return "MostAllocated"
 	default:
-		t.Fatalf("scheduler.profile %q names neither LeastAllocated nor MostAllocated", profile)
+		t.Fatalf("scheduler.profile %q names neither LeastAllocated nor MostAllocated", description)
+		return ""
 	}
-	return fmt.Sprintf("%v-%s", input["rho"], label)
 }
 
 // run(ρ 0.5/1.1, 2つの profile, 2反復) は、組ごとに反復の回数だけ記録の
 // 実行ができ、1行目のinput.rho・scheduler.profileで組が区別でき、
-// input.reference_commitにFakeの戻り値が入る。
+// input.reference_commit・input.trace_name・input.trace_version・
+// input.input_seedにも正しい値が入り、どの実行も遷移を1件以上記録する。
 func TestRun_WritesOneRunPerComboAndIteration(t *testing.T) {
 	nodesPath := writeTempCSV(t, "nodes.csv", pilotTestNodesCSV)
-	podsPath := writeTempCSV(t, "pods.csv", pilotTestPodsCSV)
+	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotTestPodsCSV)
 	store := &fakeRecordStore{}
 
-	var stdout, stderr bytes.Buffer
+	var stderr bytes.Buffer
 	code := run([]string{
 		"--nodes=" + nodesPath,
 		"--pods=" + podsPath,
@@ -173,26 +327,175 @@ func TestRun_WritesOneRunPerComboAndIteration(t *testing.T) {
 		"--ratio=1.0",
 		"--rhos=0.5,1.1",
 		"--iterations=2",
-	}, &stdout, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
+	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
 
-	if len(store.headers) != 8 { // 2 rhos x 2 profiles x 2 iterations
-		t.Fatalf("run count = %d, want 8", len(store.headers))
+	if len(store.runs) != 8 { // 2 rhos x 2 profiles x 2 iterations
+		t.Fatalf("run count = %d, want 8", len(store.runs))
 	}
 
 	comboCounts := map[string]int{}
-	for _, h := range store.headers {
+	var transitionLineCounts []int
+	wantTraceVersion := strings.TrimSuffix(pilotTestPodsFile, ".csv")
+	for _, run := range store.runs {
+		h := run.header
 		input, _ := h["input"].(map[string]any)
 		if got, _ := input["reference_commit"].(string); got != "fake-reference-commit" {
 			t.Errorf("input.reference_commit = %q, want %q", got, "fake-reference-commit")
 		}
+		if got, _ := input["trace_name"].(string); got != traceName {
+			t.Errorf("input.trace_name = %q, want %q", got, traceName)
+		}
+		if got, _ := input["trace_version"].(string); got != wantTraceVersion {
+			t.Errorf("input.trace_version = %q, want %q", got, wantTraceVersion)
+		}
+		if got, _ := input["input_seed"].(string); got != "1" {
+			t.Errorf("input.input_seed = %q, want %q", got, "1")
+		}
+		if run.transitionLines == 0 {
+			t.Errorf("run with header %v recorded no transitions", h)
+		}
+		transitionLineCounts = append(transitionLineCounts, run.transitionLines)
 		comboCounts[comboKey(t, h)]++
 	}
 	for _, combo := range []string{"0.5-LeastAllocated", "0.5-MostAllocated", "1.1-LeastAllocated", "1.1-MostAllocated"} {
 		if comboCounts[combo] != 2 {
 			t.Errorf("combo %s ran %d times, want 2 (comboCounts: %v)", combo, comboCounts[combo], comboCounts)
 		}
+	}
+	// All 8 runs replay the same 3-pod event slice onto the same single
+	// node, so they must all record the same number of transitions; a run
+	// recording fewer (e.g. a later iteration silently not being sent the
+	// events) would otherwise go unnoticed as long as its count stayed
+	// above zero.
+	for _, n := range transitionLineCounts[1:] {
+		if n != transitionLineCounts[0] {
+			t.Errorf("transition line counts differ across runs: %v, want all equal", transitionLineCounts)
+			break
+		}
+	}
+}
+
+// pilotSpreadNodesCSV has two equal-capacity nodes, each able to host all
+// four pods in pilotSpreadPodsCSV on its own (4*500 = 2000 <= 2200), so
+// LeastAllocated and MostAllocated disagree on how many nodes get used.
+const pilotSpreadNodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
+	"openb-node-0000,2200,2200,0,\n" +
+	"openb-node-0001,2200,2200,0,\n"
+
+// pilotSpreadPodsCSV's four pods all request a quarter of one node's
+// capacity and stay running throughout (deletion_time far past every
+// creation_time), so all four coexist and must all be scheduled.
+const pilotSpreadPodsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n" +
+	"openb-pod-0000,500,500,0,0,,LS,Running,0,10000,0\n" +
+	"openb-pod-0001,500,500,0,0,,LS,Running,10,10000,10\n" +
+	"openb-pod-0002,500,500,0,0,,LS,Running,20,10000,20\n" +
+	"openb-pod-0003,500,500,0,0,,LS,Running,30,10000,30\n"
+
+// scheduler.WithProfiles(schedulerProfile) が実際にシナリオに渡っていなければ
+// （既定の scheduler のまま動けば）、LeastAllocated と MostAllocated の実行の
+// 置かれたノードの数に違いが出ない。ノードの数字は資源の使用率を均そうとする
+// LeastAllocated が2ノードに分け、使用率を高くまとめようとする
+// MostAllocated が1ノードに詰めることを利用する（配置先のノード名そのものは
+// 乱数で選ばれるので確かめない）。
+func TestRun_SchedulerProfileAffectsNodePlacement(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", pilotSpreadNodesCSV)
+	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotSpreadPodsCSV)
+	store := &fakeRecordStore{}
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+		"--seed=1",
+		"--ratio=1.0",
+		"--rhos=0.5",
+		"--iterations=1",
+	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	if len(store.runs) != 2 { // 1 rho x 2 profiles x 1 iteration
+		t.Fatalf("run count = %d, want 2", len(store.runs))
+	}
+
+	for _, run := range store.runs {
+		sched, _ := run.header["scheduler"].(map[string]any)
+		profile, _ := sched["profile"].(string)
+		label := profileLabel(t, profile)
+		nodesUsed := len(run.assignedNodes)
+		switch label {
+		case "LeastAllocated":
+			if nodesUsed != 2 {
+				t.Errorf("LeastAllocated used %d node(s), want 2 (spread across both nodes)", nodesUsed)
+			}
+		case "MostAllocated":
+			if nodesUsed != 1 {
+				t.Errorf("MostAllocated used %d node(s), want 1 (packed onto one node)", nodesUsed)
+			}
+		}
+	}
+}
+
+// --iterations が0以下なら、記録が1つもできない実行を終了コード0で終わらせず
+// 失敗として終わる。
+func TestRun_FailsWhenIterationsIsNotPositive(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", pilotTestNodesCSV)
+	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotTestPodsCSV)
+	store := &fakeRecordStore{}
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+		"--iterations=0",
+	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
+	if code == 0 {
+		t.Fatalf("exit code = 0, want nonzero")
+	}
+	if len(store.runs) != 0 {
+		t.Errorf("run count = %d, want 0", len(store.runs))
+	}
+}
+
+// --pods のファイル名がopenbのトレース名で始まらなければ、記録の1行目が
+// 入力のトレースについて事実でないことを名乗る前に失敗として終わる。
+func TestRun_FailsWhenPodsFileNameDoesNotNameOpenbTrace(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", pilotTestNodesCSV)
+	podsPath := writeTempCSV(t, "some_other_trace_pods.csv", pilotTestPodsCSV)
+	store := &fakeRecordStore{}
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
+	if code == 0 {
+		t.Fatalf("exit code = 0, want nonzero")
+	}
+	if len(store.runs) != 0 {
+		t.Errorf("run count = %d, want 0", len(store.runs))
+	}
+}
+
+// reference のコミットが取れないとき（例: ビルド情報もgitも使えない環境）は、
+// 実行を1つも始めずに失敗として終わる。
+func TestRun_FailsWhenReferenceCommitProviderFails(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", pilotTestNodesCSV)
+	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotTestPodsCSV)
+	store := &fakeRecordStore{}
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+	}, &stderr, store.factory, func() (string, error) { return "", fmt.Errorf("no commit available") })
+	if code == 0 {
+		t.Fatalf("exit code = 0, want nonzero")
+	}
+	if len(store.runs) != 0 {
+		t.Errorf("run count = %d, want 0", len(store.runs))
 	}
 }

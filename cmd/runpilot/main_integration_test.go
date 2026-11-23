@@ -12,17 +12,11 @@ import (
 	"testing"
 )
 
-const pilotNodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
-	"openb-node-0000,32000,262144,0,\n"
-
-const pilotPodsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n" +
-	"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n" +
-	"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n" +
-	"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n"
-
-// writeTempCSV is also defined, identically, in main_test.go: that file has
-// no build tag, so it is compiled together with this one whenever -tags
-// integration is passed, and redeclaring it here would be a build error.
+// pilotNodesCSV, pilotTestPodsFile and pilotTestPodsCSV are also defined,
+// identically, in main_test.go: that file has no build tag, so it is
+// compiled together with this one whenever -tags integration is passed, and
+// redeclaring them here would be a build error. The same goes for
+// writeTempCSV and profileLabel.
 
 // recordHeader is the subset of the transition record's header line (units/U01.md)
 // this test needs to tell runs apart.
@@ -49,31 +43,15 @@ func readHeader(t *testing.T, path string) recordHeader {
 	return h
 }
 
-// profileLabel picks out which of the two pilot profiles a header's
-// scheduler.profile description belongs to, by substring (units/U03.md's
-// description is a full sentence, not a bare name).
-func profileLabel(t *testing.T, description string) string {
-	t.Helper()
-	switch {
-	case strings.Contains(description, "LeastAllocated"):
-		return "LeastAllocated"
-	case strings.Contains(description, "MostAllocated"):
-		return "MostAllocated"
-	default:
-		t.Fatalf("scheduler.profile %q names neither LeastAllocated nor MostAllocated", description)
-		return ""
-	}
-}
-
 // 予備実験の4回の実行（spec.md シナリオ3: ρ 0.5/1.1 x LeastAllocated/MostAllocated）を
 // まとめて動かすと、組ごとに記録のファイルが1つずつでき、1行目の rho と
 // scheduler.profile で、どの組の実行かが区別できる。
 func TestRun_WritesOneRecordFilePerCombo(t *testing.T) {
-	nodesPath := writeTempCSV(t, "nodes.csv", pilotNodesCSV)
-	podsPath := writeTempCSV(t, "pods.csv", pilotPodsCSV)
+	nodesPath := writeTempCSV(t, "nodes.csv", pilotTestNodesCSV)
+	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotTestPodsCSV)
 	outDir := t.TempDir()
 
-	var stdout, stderr bytes.Buffer
+	var stderr bytes.Buffer
 	code := run([]string{
 		"--nodes=" + nodesPath,
 		"--pods=" + podsPath,
@@ -82,7 +60,7 @@ func TestRun_WritesOneRecordFilePerCombo(t *testing.T) {
 		"--rhos=0.5,1.1",
 		"--iterations=1",
 		"--out=" + outDir,
-	}, &stdout, &stderr, nil, nil)
+	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
@@ -118,15 +96,15 @@ func TestRun_WritesOneRecordFilePerCombo(t *testing.T) {
 // Pod の CSV のパスが存在しないときは、終了コードが0でなく、記録のファイルは
 // 1つもできない。
 func TestRun_FailsWhenPodsPathDoesNotExist(t *testing.T) {
-	nodesPath := writeTempCSV(t, "nodes.csv", pilotNodesCSV)
+	nodesPath := writeTempCSV(t, "nodes.csv", pilotTestNodesCSV)
 	outDir := t.TempDir()
 
-	var stdout, stderr bytes.Buffer
+	var stderr bytes.Buffer
 	code := run([]string{
 		"--nodes=" + nodesPath,
 		"--pods=/no/such/file.csv",
 		"--out=" + outDir,
-	}, &stdout, &stderr, nil, nil)
+	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
 	if code == 0 {
 		t.Fatalf("exit code = 0, want nonzero")
 	}
