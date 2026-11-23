@@ -350,6 +350,25 @@ def test_check_scenario5_fails_when_fewer_than_two_schedulers_are_listed() -> No
     assert any(not r.passed for r in results)
 
 
+def test_check_scenario5_counts_a_scheduler_name_containing_spaces() -> None:
+    # aggregate.py's render_rho_markdown writes the real scheduler_profile
+    # value verbatim (schedulerprofile.Pilot's description, e.g.
+    # "NodeResourcesFit(scoringStrategy=LeastAllocated, resources=cpu:1,
+    # memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled"),
+    # not the bare "LeastAllocated"/"MostAllocated" GOOD_REPORT_TEXT's bullet
+    # lines use. Found running against real openb data (units/U05.md's
+    # "先に抜き出す割合を小さくした入力で1回通す" step).
+    text = GOOD_REPORT_TEXT.replace(
+        "- LeastAllocated: 0.1000\n- MostAllocated: 0.1200\n",
+        "- NodeResourcesFit(scoringStrategy=LeastAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled: 0.1000\n"
+        "- NodeResourcesFit(scoringStrategy=MostAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled: 0.1200\n",
+    )
+
+    results = run_pilot.check_scenario5(text)
+
+    assert all(r.passed for r in results)
+
+
 # --- check_scenario6 ---
 
 
