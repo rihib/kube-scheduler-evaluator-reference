@@ -446,7 +446,11 @@ def final_instance_statuses(transitions: Sequence[Transition]) -> dict[str, str]
     "pending" at the end of observation). Reuses the same replay compute_metrics
     does, so this sees exactly the state compute_metrics's callers already trust.
     """
-    return {}
+    world = _World()
+    ordered = sorted(transitions, key=lambda t: (parse_time(t.time), t.seq))
+    for tr in ordered:
+        world.apply(tr, parse_time(tr.time))
+    return dict(world.instance_status)
 
 
 @dataclass(frozen=True)
