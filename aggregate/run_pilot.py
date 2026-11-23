@@ -296,11 +296,19 @@ def check_scenario6(report_text: str) -> list[CheckResult]:
     ]
 
 
-def check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int) -> list[CheckResult]:
+def check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int, label: str) -> list[CheckResult]:
     """units/U05.md's "数が合う": every used pod has a create_task transition,
     and at the end of observation every pod is either "completed" or
     "pending" (not stuck "running" or, since this pilot has no preemption,
-    "deleted")."""
+    "deleted").
+
+    label (e.g. "rho=1.1, LeastAllocated") disambiguates the result when the
+    caller runs this once per (rho, scheduler) combination: without it, all
+    four combinations' results shared the exact same two names, so a failure
+    in one combination could not be told apart from the other three passing
+    (rihib:interface-judge round 2's test rewrite found this: a test that
+    broke only the ρ=1.1/LeastAllocated combination picked up the unrelated
+    ρ=0.5/LeastAllocated combination's passing result instead, by name)."""
     created = {
         t.component_id for t in record.transitions if t.operation == aggregate.OpCreateTask and t.state == aggregate.StateInstanceStatus
     }
@@ -312,21 +320,25 @@ def check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int)
 
     return [
         CheckResult(
-            name="sanity: created pod count matches the expected used-pod count",
+            name=f"sanity: created pod count matches the expected used-pod count ({label})",
             passed=count_ok,
             detail="ok" if count_ok else f"expected {expected_pod_count} created pods, found {len(created)}",
         ),
         CheckResult(
-            name="sanity: every pod's final status is completed or pending",
+            name=f"sanity: every pod's final status is completed or pending ({label})",
             passed=final_ok,
             detail="ok" if final_ok else f"pod(s) with an unexpected final status: {bad}",
         ),
     ]
 
 
-def check_sanity_ranges(metrics: aggregate.Metrics) -> list[CheckResult]:
+def check_sanity_ranges(metrics: aggregate.Metrics, *, label: str) -> list[CheckResult]:
     """units/U05.md's "値の範囲": wait times and unplaceable_free are >= 0,
-    allocation_rate is within [0, 1], and no metric is NaN."""
+    allocation_rate is within [0, 1], and no metric is NaN.
+
+    label disambiguates the result across the four (rho, scheduler)
+    combinations the caller runs this for, the same reason check_sanity_counts
+    takes one."""
     all_waits = [w for waits in metrics.pending_wait_by_class.values() for w in waits]
     waits_ok = all(w >= 0 for w in all_waits)
     allocation_ok = all(0.0 <= v <= 1.0 for v in metrics.allocation_rate.values())
@@ -344,29 +356,29 @@ def check_sanity_ranges(metrics: aggregate.Metrics) -> list[CheckResult]:
 
     return [
         CheckResult(
-            name="sanity: pending wait times are >= 0",
+            name=f"sanity: pending wait times are >= 0 ({label})",
             passed=waits_ok,
             detail="ok" if waits_ok else f"negative wait time(s) found: {[w for w in all_waits if w < 0]}",
         ),
         CheckResult(
-            name="sanity: allocation_rate is within [0, 1]",
+            name=f"sanity: allocation_rate is within [0, 1] ({label})",
             passed=allocation_ok,
             detail="ok" if allocation_ok else f"allocation_rate out of range: {metrics.allocation_rate}",
         ),
         CheckResult(
-            name="sanity: unplaceable_free is >= 0",
+            name=f"sanity: unplaceable_free is >= 0 ({label})",
             passed=unplaceable_ok,
             detail="ok" if unplaceable_ok else f"negative unplaceable_free: {metrics.unplaceable_free}",
         ),
         CheckResult(
-            name="sanity: no metric is NaN",
+            name=f"sanity: no metric is NaN ({label})",
             passed=nan_ok,
             detail="ok" if nan_ok else f"found {len(nan_values)} NaN value(s)",
         ),
     ]
 
 
-def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho: aggregate.Metrics) -> list[CheckResult]:
+def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho: aggregate.Metrics, *, scheduler: str) -> list[CheckResult]:
     """units/U05.md's "負荷の効き方": for every resource both runs measured and
     at least one of them actually allocated against, the higher rho's
     allocation_rate is higher than the lower rho's (same scheduler profile,
@@ -378,13 +390,21 @@ def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho
     but nothing ever allocates against it (only cpu/memory/gpu get
     allocated_resource transitions), so its allocation_rate is always 0.0
     regardless of rho — found running against real openb data
-    (units/U05.md's "先に抜き出す割合を小さくした入力で1回通す" step)."""
+    (units/U05.md's "先に抜き出す割合を小さくした入力で1回通す" step).
+
+    scheduler names the result (e.g. "sanity: rho effect on allocation_rate
+    (LeastAllocated)"), matching the caller's own material-missing fallback
+    name: without it, LeastAllocated's and MostAllocated's results were
+    otherwise indistinguishable in the printed output (both named "sanity:
+    rho effect on allocation_rate", with no way to tell which scheduler a
+    failure's detail was about)."""
+    name = f"sanity: rho effect on allocation_rate ({scheduler})"
     common = sorted(set(metrics_low_rho.allocation_rate) & set(metrics_high_rho.allocation_rate))
     exercised = [r for r in common if metrics_low_rho.allocation_rate[r] > 0 or metrics_high_rho.allocation_rate[r] > 0]
     if not exercised:
         return [
             CheckResult(
-                name="sanity: rho effect on allocation_rate",
+                name=name,
                 passed=False,
                 detail="no resource both runs measured was ever actually allocated against",
             )
@@ -397,7 +417,7 @@ def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho
     ok = not not_increased
     return [
         CheckResult(
-            name="sanity: rho effect on allocation_rate",
+            name=name,
             passed=ok,
             detail="ok" if ok else f"allocation_rate did not increase from rho=0.5 to rho=1.1 for: {not_increased}",
         )
@@ -416,17 +436,25 @@ def check_sanity_rho_achieved(summary: BuildInputSummary, *, target_rho: float) 
     )
 
 
-def check_sanity_scheduler_effect(metrics_least_allocated: aggregate.Metrics, metrics_most_allocated: aggregate.Metrics) -> list[CheckResult]:
+def check_sanity_scheduler_effect(
+    metrics_least_allocated: aggregate.Metrics, metrics_most_allocated: aggregate.Metrics, *, rho: float
+) -> list[CheckResult]:
     """units/U05.md's "スケジューラの効き方": at the same rho, LeastAllocated's
     Cluster_std (lower is more evenly spread) is smaller than MostAllocated's,
     standing in for "配置先が異なる" since node names are not compared
-    (testing.md: kube-scheduler breaks ties at random)."""
+    (testing.md: kube-scheduler breaks ties at random).
+
+    rho names the result (e.g. "sanity: scheduler effect on cluster_std
+    (rho=0.5)"), matching the caller's own material-missing fallback name:
+    without it, the ρ = 0.5 and ρ = 1.1 results were otherwise
+    indistinguishable in the printed output."""
+    name = f"sanity: scheduler effect on cluster_std (rho={rho})"
     least_std = metrics_least_allocated.cluster_std
     most_std = metrics_most_allocated.cluster_std
     if least_std is None or most_std is None:
         return [
             CheckResult(
-                name="sanity: scheduler effect on cluster_std",
+                name=name,
                 passed=False,
                 detail=f"cluster_std not measured for one or both schedulers (LeastAllocated={least_std}, MostAllocated={most_std})",
             )
@@ -434,7 +462,7 @@ def check_sanity_scheduler_effect(metrics_least_allocated: aggregate.Metrics, me
     ok = least_std < most_std
     return [
         CheckResult(
-            name="sanity: scheduler effect on cluster_std",
+            name=name,
             passed=ok,
             detail="ok" if ok else f"expected cluster_std(LeastAllocated) < cluster_std(MostAllocated), got {least_std} >= {most_std}",
         )
@@ -498,10 +526,11 @@ def run_all_checks(
                 )
             )
             continue
-        results += check_sanity_counts(record, expected_pod_count=expected_pod_count)
+        label = f"rho={rho}, {scheduler}"
+        results += check_sanity_counts(record, expected_pod_count=expected_pod_count, label=label)
         metrics = aggregate.compute_metrics(record.transitions)
         metrics_by_combo[(rho, scheduler)] = metrics
-        results += check_sanity_ranges(metrics)
+        results += check_sanity_ranges(metrics, label=label)
 
     rec_high_least = find(aggregate.RHO_HIGH_LOAD, "LeastAllocated")
     if rec_high_least is not None:
@@ -524,7 +553,7 @@ def run_all_checks(
         m_low = metrics_by_combo.get((aggregate.RHO_NEGATIVE_CONTROL, scheduler))
         m_high = metrics_by_combo.get((aggregate.RHO_HIGH_LOAD, scheduler))
         if m_low is not None and m_high is not None:
-            results += check_sanity_rho_effect(m_low, m_high)
+            results += check_sanity_rho_effect(m_low, m_high, scheduler=scheduler)
         else:
             results.append(
                 CheckResult(
@@ -538,7 +567,7 @@ def run_all_checks(
         m_least = metrics_by_combo.get((rho, "LeastAllocated"))
         m_most = metrics_by_combo.get((rho, "MostAllocated"))
         if m_least is not None and m_most is not None:
-            results += check_sanity_scheduler_effect(m_least, m_most)
+            results += check_sanity_scheduler_effect(m_least, m_most, rho=rho)
         else:
             results.append(
                 CheckResult(

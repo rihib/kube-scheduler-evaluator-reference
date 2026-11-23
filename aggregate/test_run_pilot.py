@@ -10,14 +10,30 @@
 """Unit and integration tests for run_pilot.py (units/U05.md).
 
 Run with: uv run --with pytest aggregate/test_run_pilot.py
-Integration tests are marked `integration`; run only unit tests with
-`uv run --with pytest aggregate/test_run_pilot.py -m "not integration"`.
+Integration tests (marked `integration`, slow: each runs "go run" two or
+three times) are excluded by default — "-m not integration" is always
+prepended, so run_checks.sh's PY: line (which invokes this script with no
+extra arguments at all) and a human adding "-q" or "-k ..." both still skip
+them. Pass your own "-m" to override it, since pytest keeps the *last* -m
+it sees: `... aggregate/test_run_pilot.py -m integration` runs only the
+integration test, and `-m ""` runs everything.
+
+Seams (rihib:interface-judge round 1): `run_all_checks` (the "検査とThenを
+確かめる処理", a deep module) and `run` (the one outer entry point) are the
+two public interfaces tests call. The individual `check_scenario*`/
+`check_sanity_*`/`format_results`/`parse_buildinput_summary`/
+`count_eligible_pods`/`expected_sampled_count` functions are implementation
+detail of `run_all_checks` and are exercised only through it below, never
+called directly.
 """
 
 from __future__ import annotations
 
+import json
 import sys
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,90 +41,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import aggregate
 import run_pilot
 
-BUILDINPUT_SUMMARY_TEXT = "used pods:     800\nexcluded pods: 200\nfailed pods:   12\nrho (before):  0.734521\nrho (after):   1.100000\n"
-
-
-def test_parse_buildinput_summary_reads_every_field() -> None:
-    summary = run_pilot.parse_buildinput_summary(BUILDINPUT_SUMMARY_TEXT)
-
-    assert summary == run_pilot.BuildInputSummary(
-        used_pods=800,
-        excluded_pods=200,
-        failed_pods=12,
-        rho_before=0.734521,
-        rho_after=1.1,
-    )
-
-
-def test_parse_buildinput_summary_raises_when_a_field_is_missing() -> None:
-    text = "used pods:     800\n"
-
-    try:
-        run_pilot.parse_buildinput_summary(text)
-    except ValueError as e:
-        assert "rho (after)" in str(e) or "excluded" in str(e) or "failed" in str(e) or "rho (before)" in str(e)
-    else:
-        raise AssertionError("expected ValueError for a buildinput summary missing fields")
-
-
 POD_CSV_HEADER = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n"
-
-
-def test_count_eligible_pods_excludes_pending_rows() -> None:
-    # scenarios/clusterdata/input_version.go's BuildInputVersion treats
-    # "Pending" (case-insensitively) as the only excluded phase before sampling;
-    # units/U05.md's "使った件数が...Pendingを除いたPodの80%であること" needs
-    # that same eligible count independently of what buildinput itself reports.
-    csv_text = (
-        POD_CSV_HEADER
-        + "pod-1,100,100,0,0,,BestEffort,Running,0,10,0\n"
-        + "pod-2,100,100,0,0,,BestEffort,Pending,0,,\n"
-        + "pod-3,100,100,0,0,,BestEffort,Failed,0,10,0\n"
-        + "pod-4,100,100,0,0,,BestEffort,pending,0,,\n"
-    )
-
-    assert run_pilot.count_eligible_pods(csv_text) == 2
-
-
-def test_expected_sampled_count_rounds_half_up_like_go() -> None:
-    # scenarios/clusterdata/input_version.go's sampleAndOrderPods:
-    # int(float64(len(eligible))*sampleRatio + 0.5).
-    assert run_pilot.expected_sampled_count(eligible=5, ratio=0.5) == 3
-    assert run_pilot.expected_sampled_count(eligible=1000, ratio=0.8) == 800
-
-
-# --- check_scenario1 ---
-
-
-def test_check_scenario1_passes_when_used_count_and_rho_match() -> None:
-    summary = run_pilot.BuildInputSummary(used_pods=800, excluded_pods=200, failed_pods=12, rho_before=0.5, rho_after=1.1)
-
-    results = run_pilot.check_scenario1(summary, eligible_pods=1000, ratio=0.8, target_rho=1.1)
-
-    assert all(r.passed for r in results)
-    assert {r.name for r in results} == {"scenario1: used pods is 80% of non-pending pods", "scenario1: achieved rho matches the target"}
-
-
-def test_check_scenario1_fails_when_used_count_is_off() -> None:
-    summary = run_pilot.BuildInputSummary(used_pods=799, excluded_pods=201, failed_pods=12, rho_before=0.5, rho_after=1.1)
-
-    results = run_pilot.check_scenario1(summary, eligible_pods=1000, ratio=0.8, target_rho=1.1)
-
-    used_check = next(r for r in results if r.name == "scenario1: used pods is 80% of non-pending pods")
-    assert used_check.passed is False
-    assert "800" in used_check.detail and "799" in used_check.detail
-
-
-def test_check_scenario1_fails_when_rho_does_not_match_target() -> None:
-    summary = run_pilot.BuildInputSummary(used_pods=800, excluded_pods=200, failed_pods=12, rho_before=0.5, rho_after=1.05)
-
-    results = run_pilot.check_scenario1(summary, eligible_pods=1000, ratio=0.8, target_rho=1.1)
-
-    rho_check = next(r for r in results if r.name == "scenario1: achieved rho matches the target")
-    assert rho_check.passed is False
-
-
-# --- check_scenario2 ---
 
 
 def _transition(time: str, seq: int, operation: str, component_id: str, state: str = "", **kw) -> aggregate.Transition:
@@ -144,96 +77,115 @@ def _header(**overrides) -> aggregate.RunHeader:
     return aggregate.RunHeader(**fields)
 
 
-def _good_scenario2_transitions() -> list[aggregate.Transition]:
-    return [
-        _transition("2024-01-01T00:00:00.000000000Z", 1, "register_node", "node-1", state="resource_capacity", after={"cpu": "10"}),
-        _transition("2024-01-01T00:00:05.000000000Z", 2, "assign_node", "instance-1", state="assigned_node", after="node-1"),
-        _transition("2024-01-01T00:00:10.000000000Z", 3, "complete", "instance-1", state="instance_status", after="completed"),
-    ]
+def _create(time_sec: int, seq: int, task_id: str, instance_id: str) -> aggregate.Transition:
+    return _transition(
+        f"2024-01-01T00:00:{time_sec:02d}.000000000Z",
+        seq,
+        "create_task",
+        instance_id,
+        state="instance_status",
+        task_id=task_id,
+        after="pending",
+    )
 
 
-def test_check_scenario2_passes_for_a_well_formed_record() -> None:
-    record = aggregate.RunRecord(header=_header(), transitions=_good_scenario2_transitions())
-
-    results = run_pilot.check_scenario2(record)
-
-    assert all(r.passed for r in results)
-
-
-def test_check_scenario2_fails_when_header_is_missing_a_field() -> None:
-    record = aggregate.RunRecord(header=_header(reference_commit=""), transitions=_good_scenario2_transitions())
-
-    results = run_pilot.check_scenario2(record)
-
-    header_check = next(r for r in results if "header" in r.name)
-    assert header_check.passed is False
+def _complete(time_sec: int, seq: int, task_id: str, instance_id: str) -> aggregate.Transition:
+    return _transition(
+        f"2024-01-01T00:00:{time_sec:02d}.000000000Z",
+        seq,
+        "complete",
+        instance_id,
+        state="instance_status",
+        task_id=task_id,
+        after="completed",
+    )
 
 
-def test_check_scenario2_fails_when_no_initial_node_capacity_is_recorded() -> None:
-    record = aggregate.RunRecord(header=_header(), transitions=_good_scenario2_transitions()[1:])
+class _Builder:
+    """Builds a transition list with the same shape record.go's Manager writes
+    (mirrors aggregate/test_aggregate.py's RecordBuilder), so the sanity-check
+    tests below exercise run_all_checks's metrics computation the way a real
+    record would, instead of constructing aggregate.Metrics directly."""
 
-    results = run_pilot.check_scenario2(record)
+    def __init__(self) -> None:
+        self._seq = 0
+        self.transitions: list[aggregate.Transition] = []
 
-    capacity_check = next(r for r in results if "capacity" in r.name)
-    assert capacity_check.passed is False
+    def _next_seq(self) -> int:
+        self._seq += 1
+        return self._seq
 
+    def _write(self, time, op, component_id, task_id="", state="", state_key="", before=None, after=None, task_immutable=None) -> None:
+        self.transitions.append(
+            aggregate.Transition(
+                time=f"2024-01-01T00:00:{time:02d}.000000000Z",
+                seq=self._next_seq(),
+                operation=op,
+                component_id=component_id,
+                task_id=task_id or None,
+                state=state,
+                state_key=state_key or None,
+                before=before,
+                after=after,
+                task_immutable=task_immutable,
+            )
+        )
 
-def test_check_scenario2_fails_when_virtual_time_goes_backwards() -> None:
-    transitions = _good_scenario2_transitions()
-    out_of_order = [transitions[0], transitions[2], transitions[1]]  # complete before assign, by position
+    def register_node(self, time, node_id, capacity: dict[str, str]) -> _Builder:
+        self._write(time, "register_node", node_id, state="resource_capacity", after=capacity)
+        return self
 
-    record = aggregate.RunRecord(header=_header(), transitions=out_of_order)
+    def create_task(self, time, task_id, instance_id, cpu="1", memory="0", gpu="0") -> _Builder:
+        immutable = {
+            "owner": "u1",
+            "group": "g1",
+            "job_id": task_id,
+            "resource_request": {"cpu": cpu, "memory": memory, "nvidia.com/gpu": gpu},
+            "resource_limit": {"cpu": cpu, "memory": memory, "nvidia.com/gpu": gpu},
+            "priority": 0,
+        }
+        self._write(time, "create_task", instance_id, task_id=task_id, state="instance_status", after="pending", task_immutable=immutable)
+        self._write(time, "create_task", instance_id, task_id=task_id, state="assigned_node", after=None)
+        return self
 
-    results = run_pilot.check_scenario2(record)
+    def bind(self, time, task_id, instance_id, node_id, allocated: dict[str, str]) -> _Builder:
+        self._write(time, "assign_node", instance_id, task_id=task_id, state="assigned_node", after=node_id)
+        self._write(time, "assign_node", node_id, task_id=task_id, state="allocated_resource", state_key=instance_id, after=allocated)
+        self._write(time, "start", instance_id, task_id=task_id, state="instance_status", before="pending", after="running")
+        return self
 
-    time_check = next(r for r in results if "time" in r.name)
-    assert time_check.passed is False
-
-
-# --- check_scenario3 ---
-
-
-def _record_with(rho: float, scheduler_profile: str) -> aggregate.RunRecord:
-    return aggregate.RunRecord(header=_header(rho=rho, scheduler_profile=scheduler_profile), transitions=[])
-
-
-def test_check_scenario3_passes_for_four_distinct_combinations() -> None:
-    records = [
-        _record_with(0.5, "LeastAllocated"),
-        _record_with(0.5, "MostAllocated"),
-        _record_with(1.1, "LeastAllocated"),
-        _record_with(1.1, "MostAllocated"),
-    ]
-
-    results = run_pilot.check_scenario3(records)
-
-    assert all(r.passed for r in results)
-
-
-def test_check_scenario3_fails_when_there_are_not_four_records() -> None:
-    records = [_record_with(0.5, "LeastAllocated"), _record_with(1.1, "LeastAllocated")]
-
-    results = run_pilot.check_scenario3(records)
-
-    count_check = next(r for r in results if "four" in r.name)
-    assert count_check.passed is False
-
-
-def test_check_scenario3_fails_when_two_records_share_the_same_combination() -> None:
-    records = [
-        _record_with(0.5, "LeastAllocated"),
-        _record_with(0.5, "LeastAllocated"),
-        _record_with(1.1, "LeastAllocated"),
-        _record_with(1.1, "MostAllocated"),
-    ]
-
-    results = run_pilot.check_scenario3(records)
-
-    distinct_check = next(r for r in results if "distinct" in r.name)
-    assert distinct_check.passed is False
+    def complete(self, time, task_id, instance_id, node_id, allocated: dict[str, str]) -> _Builder:
+        self._write(time, "complete", instance_id, task_id=task_id, state="instance_status", before="running", after="completed")
+        self._write(time, "release", node_id, task_id=task_id, state="allocated_resource", state_key=instance_id, before=allocated, after=None)
+        return self
 
 
-# --- check_scenario4 ---
+def _find_record(records: list[aggregate.RunRecord], rho: float, scheduler_profile: str) -> aggregate.RunRecord:
+    return next(r for r in records if r.header.rho == rho and r.header.scheduler_profile == scheduler_profile)
+
+
+def _good_combo_record(rho: float, scheduler_profile: str) -> aggregate.RunRecord:
+    """A minimal record good enough to pass every per-record check: one pod
+    created and completed, one node whose capacity is recorded up front."""
+    return aggregate.RunRecord(
+        header=_header(rho=rho, scheduler_profile=scheduler_profile),
+        transitions=[
+            _transition("2024-01-01T00:00:00.000000000Z", 1, "register_node", "node-1", state="resource_capacity", after={"cpu": "10"}),
+            _create(0, 2, "task-1", "instance-1"),
+            _transition(
+                "2024-01-01T00:00:05.000000000Z",
+                3,
+                "start",
+                "instance-1",
+                state="instance_status",
+                task_id="task-1",
+                before="pending",
+                after="running",
+            ),
+            _complete(10, 4, "task-1", "instance-1"),
+        ],
+    )
+
 
 GOOD_REPORT_TEXT = """# 実験1 集計報告
 
@@ -297,350 +249,6 @@ LeastAllocated − MostAllocated
 | unplaceable_free:cpu | 0.4000 | 当たった |
 | wait:8 | 0.5000 | 当たった |
 """
-
-
-def test_check_scenario4_passes_for_a_complete_report() -> None:
-    results = run_pilot.check_scenario4(GOOD_REPORT_TEXT, existing_figures={"figures/rho-0.5-wait.png", "figures/rho-1.1-wait.png"})
-
-    assert all(r.passed for r in results)
-
-
-def test_check_scenario4_fails_when_a_referenced_figure_is_missing() -> None:
-    results = run_pilot.check_scenario4(GOOD_REPORT_TEXT, existing_figures={"figures/rho-0.5-wait.png"})
-
-    figure_check = next(r for r in results if "figure" in r.name)
-    assert figure_check.passed is False
-    assert "rho-1.1-wait.png" in figure_check.detail
-
-
-def test_check_scenario4_fails_when_the_diff_section_only_has_the_fallback_message() -> None:
-    text = GOOD_REPORT_TEXT.replace(
-        "LeastAllocated − MostAllocated\n\n| metric | diff |\n| --- | --- |\n| cluster_std | 0.2 |",
-        "LeastAllocated と MostAllocated がどの入力の版でもそろわず、差を計算できなかった。",
-    )
-
-    results = run_pilot.check_scenario4(text, existing_figures={"figures/rho-0.5-wait.png", "figures/rho-1.1-wait.png"})
-
-    diff_check = next(r for r in results if "diff" in r.name)
-    assert diff_check.passed is False
-
-
-# --- check_scenario5 ---
-
-
-def test_check_scenario5_passes_when_the_negative_control_section_is_complete() -> None:
-    results = run_pilot.check_scenario5(GOOD_REPORT_TEXT)
-
-    assert all(r.passed for r in results)
-
-
-def test_check_scenario5_fails_when_rho_0_5_has_no_negative_control_section() -> None:
-    text = GOOD_REPORT_TEXT.split("### 陰性対照")[0] + "## ρ = 1.1\n"
-
-    results = run_pilot.check_scenario5(text)
-
-    assert any(not r.passed for r in results)
-
-
-def test_check_scenario5_fails_when_fewer_than_two_schedulers_are_listed() -> None:
-    text = GOOD_REPORT_TEXT.replace("- MostAllocated: 0.1200\n", "")
-
-    results = run_pilot.check_scenario5(text)
-
-    assert any(not r.passed for r in results)
-
-
-def test_check_scenario5_counts_a_scheduler_name_containing_spaces() -> None:
-    # aggregate.py's render_rho_markdown writes the real scheduler_profile
-    # value verbatim (schedulerprofile.Pilot's description, e.g.
-    # "NodeResourcesFit(scoringStrategy=LeastAllocated, resources=cpu:1,
-    # memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled"),
-    # not the bare "LeastAllocated"/"MostAllocated" GOOD_REPORT_TEXT's bullet
-    # lines use. Found running against real openb data (units/U05.md's
-    # "先に抜き出す割合を小さくした入力で1回通す" step).
-    text = GOOD_REPORT_TEXT.replace(
-        "- LeastAllocated: 0.1000\n- MostAllocated: 0.1200\n",
-        "- NodeResourcesFit(scoringStrategy=LeastAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled: 0.1000\n"
-        "- NodeResourcesFit(scoringStrategy=MostAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled: 0.1200\n",
-    )
-
-    results = run_pilot.check_scenario5(text)
-
-    assert all(r.passed for r in results)
-
-
-# --- check_scenario6 ---
-
-
-def test_check_scenario6_passes_when_the_prediction_section_has_both_metrics() -> None:
-    results = run_pilot.check_scenario6(GOOD_REPORT_TEXT)
-
-    assert all(r.passed for r in results)
-
-
-def test_check_scenario6_fails_when_rho_1_1_has_no_prediction_section() -> None:
-    text = GOOD_REPORT_TEXT.split("### 予測と結果（高負荷）")[0]
-
-    results = run_pilot.check_scenario6(text)
-
-    assert any(not r.passed for r in results)
-
-
-def test_check_scenario6_fails_when_the_unplaceable_free_row_is_missing() -> None:
-    text = GOOD_REPORT_TEXT.replace("| unplaceable_free:cpu | 0.4000 | 当たった |\n", "")
-
-    results = run_pilot.check_scenario6(text)
-
-    assert any(not r.passed for r in results)
-
-
-# --- check_sanity_counts ---
-
-
-def _create(time_sec: int, seq: int, task_id: str, instance_id: str) -> aggregate.Transition:
-    return _transition(
-        f"2024-01-01T00:00:{time_sec:02d}.000000000Z",
-        seq,
-        "create_task",
-        instance_id,
-        state="instance_status",
-        task_id=task_id,
-        after="pending",
-    )
-
-
-def _complete(time_sec: int, seq: int, task_id: str, instance_id: str) -> aggregate.Transition:
-    return _transition(
-        f"2024-01-01T00:00:{time_sec:02d}.000000000Z",
-        seq,
-        "complete",
-        instance_id,
-        state="instance_status",
-        task_id=task_id,
-        after="completed",
-    )
-
-
-def test_check_sanity_counts_passes_when_every_pod_ends_pending_or_completed() -> None:
-    record = aggregate.RunRecord(
-        header=_header(),
-        transitions=[
-            _create(0, 1, "task-1", "instance-1"),
-            _complete(10, 2, "task-1", "instance-1"),
-            _create(0, 3, "task-2", "instance-2"),  # stays pending
-        ],
-    )
-
-    results = run_pilot.check_sanity_counts(record, expected_pod_count=2)
-
-    assert all(r.passed for r in results)
-
-
-def test_check_sanity_counts_fails_when_created_count_does_not_match() -> None:
-    record = aggregate.RunRecord(header=_header(), transitions=[_create(0, 1, "task-1", "instance-1")])
-
-    results = run_pilot.check_sanity_counts(record, expected_pod_count=2)
-
-    count_check = next(r for r in results if "created" in r.name)
-    assert count_check.passed is False
-
-
-def test_check_sanity_counts_fails_when_a_pod_is_still_running_at_the_end() -> None:
-    record = aggregate.RunRecord(
-        header=_header(),
-        transitions=[
-            _create(0, 1, "task-1", "instance-1"),
-            _transition(
-                "2024-01-01T00:00:05.000000000Z", 2, "start", "instance-1", state="instance_status", task_id="task-1", after="running"
-            ),
-        ],
-    )
-
-    results = run_pilot.check_sanity_counts(record, expected_pod_count=1)
-
-    final_check = next(r for r in results if "final" in r.name)
-    assert final_check.passed is False
-
-
-# --- check_sanity_ranges ---
-
-
-def _metrics(**overrides) -> aggregate.Metrics:
-    fields = {
-        "pending_wait_by_class": {"0": [1.0, 2.0]},
-        "pending_count_at_end": 0,
-        "allocation_rate": {"cpu": 0.5},
-        "unplaceable_free": {"cpu": 10.0},
-        "cluster_std": 0.2,
-        "nonzero_wait_fraction": 0.5,
-    }
-    fields.update(overrides)
-    return aggregate.Metrics(**fields)
-
-
-def test_check_sanity_ranges_passes_for_well_formed_metrics() -> None:
-    results = run_pilot.check_sanity_ranges(_metrics())
-
-    assert all(r.passed for r in results)
-
-
-def test_check_sanity_ranges_fails_for_a_negative_wait_time() -> None:
-    results = run_pilot.check_sanity_ranges(_metrics(pending_wait_by_class={"0": [-1.0]}))
-
-    wait_check = next(r for r in results if "wait" in r.name)
-    assert wait_check.passed is False
-
-
-def test_check_sanity_ranges_fails_for_an_allocation_rate_outside_0_1() -> None:
-    results = run_pilot.check_sanity_ranges(_metrics(allocation_rate={"cpu": 1.5}))
-
-    alloc_check = next(r for r in results if "allocation" in r.name)
-    assert alloc_check.passed is False
-
-
-def test_check_sanity_ranges_fails_for_a_negative_unplaceable_free() -> None:
-    results = run_pilot.check_sanity_ranges(_metrics(unplaceable_free={"cpu": -1.0}))
-
-    free_check = next(r for r in results if "unplaceable" in r.name)
-    assert free_check.passed is False
-
-
-def test_check_sanity_ranges_fails_for_a_nan_value() -> None:
-    results = run_pilot.check_sanity_ranges(_metrics(cluster_std=float("nan")))
-
-    nan_check = next(r for r in results if "nan" in r.name.lower() or "NaN" in r.name)
-    assert nan_check.passed is False
-
-
-# --- check_sanity_rho_effect ---
-
-
-def test_check_sanity_rho_effect_passes_when_allocation_rate_is_higher_at_high_rho() -> None:
-    low = _metrics(allocation_rate={"cpu": 0.3, "memory": 0.2})
-    high = _metrics(allocation_rate={"cpu": 0.6, "memory": 0.5})
-
-    results = run_pilot.check_sanity_rho_effect(low, high)
-
-    assert all(r.passed for r in results)
-
-
-def test_check_sanity_rho_effect_fails_when_a_resource_does_not_increase() -> None:
-    low = _metrics(allocation_rate={"cpu": 0.6})
-    high = _metrics(allocation_rate={"cpu": 0.3})
-
-    results = run_pilot.check_sanity_rho_effect(low, high)
-
-    assert any(not r.passed for r in results)
-
-
-def test_check_sanity_rho_effect_fails_when_no_resource_is_common() -> None:
-    low = _metrics(allocation_rate={"cpu": 0.3})
-    high = _metrics(allocation_rate={"gpu": 0.5})
-
-    results = run_pilot.check_sanity_rho_effect(low, high)
-
-    assert any(not r.passed for r in results)
-
-
-def test_check_sanity_rho_effect_ignores_a_resource_never_allocated_by_either_run() -> None:
-    # Found running against real openb data (units/U05.md's "先に抜き出す割合
-    # を小さくした入力で1回通す" step): every node's capacity carries a "pods"
-    # entry (scenarios/clusterdata/gpu2023.go's buildNode sets
-    # corev1.ResourcePods), but nothing ever allocates against it (only cpu/
-    # memory/gpu get allocated_resource transitions), so its allocation_rate
-    # is always exactly 0.0 regardless of rho. That resource must not count
-    # as "did not increase" when the resources that are actually exercised
-    # (here cpu) did increase as expected.
-    low = _metrics(allocation_rate={"cpu": 0.3, "pods": 0.0})
-    high = _metrics(allocation_rate={"cpu": 0.6, "pods": 0.0})
-
-    results = run_pilot.check_sanity_rho_effect(low, high)
-
-    assert all(r.passed for r in results)
-
-
-# --- check_sanity_scheduler_effect ---
-
-
-def test_check_sanity_scheduler_effect_passes_when_least_allocated_spreads_more_evenly() -> None:
-    least = _metrics(cluster_std=0.1)
-    most = _metrics(cluster_std=0.4)
-
-    results = run_pilot.check_sanity_scheduler_effect(least, most)
-
-    assert all(r.passed for r in results)
-
-
-def test_check_sanity_scheduler_effect_fails_when_cluster_std_is_equal() -> None:
-    least = _metrics(cluster_std=0.2)
-    most = _metrics(cluster_std=0.2)
-
-    results = run_pilot.check_sanity_scheduler_effect(least, most)
-
-    assert any(not r.passed for r in results)
-
-
-def test_check_sanity_scheduler_effect_fails_when_least_allocated_has_the_bigger_std() -> None:
-    least = _metrics(cluster_std=0.5)
-    most = _metrics(cluster_std=0.2)
-
-    results = run_pilot.check_sanity_scheduler_effect(least, most)
-
-    assert any(not r.passed for r in results)
-
-
-def test_check_sanity_scheduler_effect_fails_when_cluster_std_was_not_measured() -> None:
-    least = _metrics(cluster_std=None)
-    most = _metrics(cluster_std=0.2)
-
-    results = run_pilot.check_sanity_scheduler_effect(least, most)
-
-    assert any(not r.passed for r in results)
-
-
-# --- check_sanity_rho_achieved ---
-
-
-def test_check_sanity_rho_achieved_passes_when_rho_after_matches_target() -> None:
-    summary = run_pilot.BuildInputSummary(used_pods=800, excluded_pods=200, failed_pods=12, rho_before=0.3, rho_after=0.5)
-
-    result = run_pilot.check_sanity_rho_achieved(summary, target_rho=0.5)
-
-    assert result.passed is True
-
-
-def test_check_sanity_rho_achieved_fails_when_rho_after_does_not_match_target() -> None:
-    summary = run_pilot.BuildInputSummary(used_pods=800, excluded_pods=200, failed_pods=12, rho_before=0.3, rho_after=0.45)
-
-    result = run_pilot.check_sanity_rho_achieved(summary, target_rho=0.5)
-
-    assert result.passed is False
-
-
-# --- run_all_checks ---
-
-
-def _good_combo_record(rho: float, scheduler_profile: str) -> aggregate.RunRecord:
-    """A minimal record good enough to pass every per-record check: one pod
-    created and completed, one node whose capacity is recorded up front."""
-    return aggregate.RunRecord(
-        header=_header(rho=rho, scheduler_profile=scheduler_profile),
-        transitions=[
-            _transition("2024-01-01T00:00:00.000000000Z", 1, "register_node", "node-1", state="resource_capacity", after={"cpu": "10"}),
-            _create(0, 2, "task-1", "instance-1"),
-            _transition(
-                "2024-01-01T00:00:05.000000000Z",
-                3,
-                "start",
-                "instance-1",
-                state="instance_status",
-                task_id="task-1",
-                before="pending",
-                after="running",
-            ),
-            _complete(10, 4, "task-1", "instance-1"),
-        ],
-    )
 
 
 def _good_run_all_checks_kwargs() -> dict:
@@ -714,19 +322,531 @@ def test_run_all_checks_matches_records_whose_scheduler_profile_is_the_full_desc
     assert all("material missing" not in r.detail for r in results)
 
 
-# --- format_results ---
+# --- scenario 1: input summary ---
 
 
-def test_format_results_marks_each_result_pass_or_fail_with_its_detail() -> None:
-    results = [
-        run_pilot.CheckResult(name="a", passed=True, detail="ok"),
-        run_pilot.CheckResult(name="b", passed=False, detail="went wrong"),
+def test_run_all_checks_flags_scenario1_when_used_pod_count_is_off() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["buildinput_summary_high_rho"] = replace(kwargs["buildinput_summary_high_rho"], used_pods=999)
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario1: used pods is 80% of non-pending pods")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario1_when_rho_does_not_match_target() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["buildinput_summary_high_rho"] = replace(kwargs["buildinput_summary_high_rho"], rho_after=1.05)
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario1: achieved rho matches the target")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_rho_achieved_when_the_low_rho_summary_does_not_match_its_target() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["buildinput_summary_low_rho"] = replace(kwargs["buildinput_summary_low_rho"], rho_after=0.45)
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == f"sanity: rho={aggregate.RHO_NEGATIVE_CONTROL} achieved matches the target")
+    assert check.passed is False
+
+
+# --- scenario 2: one run's record ---
+
+
+def test_run_all_checks_flags_scenario2_header_when_a_commit_is_missing() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    records = kwargs["records"]
+    target = _find_record(records, 1.1, "LeastAllocated")
+    broken = aggregate.RunRecord(header=replace(target.header, reference_commit=""), transitions=target.transitions)
+    kwargs["records"] = [r if r is not target else broken for r in records]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if "header names" in r.name)
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario2_capacity_when_no_node_is_registered() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    records = kwargs["records"]
+    target = _find_record(records, 1.1, "LeastAllocated")
+    without_capacity = aggregate.RunRecord(
+        header=target.header,
+        transitions=[t for t in target.transitions if t.operation != "register_node"],
+    )
+    kwargs["records"] = [r if r is not target else without_capacity for r in records]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if "capacity" in r.name)
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario2_time_order_when_transitions_are_out_of_order() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    records = kwargs["records"]
+    target = _find_record(records, 1.1, "LeastAllocated")
+    t = target.transitions
+    reordered = aggregate.RunRecord(header=target.header, transitions=[t[0], t[-1], *t[1:-1]])  # complete before start, by position
+    kwargs["records"] = [r if r is not target else reordered for r in records]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if "virtual time" in r.name)
+    assert check.passed is False
+
+
+# --- scenario 3: four records ---
+
+
+def test_run_all_checks_flags_scenario3_when_a_combination_is_missing() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["records"] = [r for r in kwargs["records"] if not (r.header.rho == 1.1 and r.header.scheduler_profile == "MostAllocated")]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario3: four records exist")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario3_when_two_records_share_a_combination() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["records"] = [
+        _good_combo_record(0.5, "LeastAllocated"),
+        _good_combo_record(0.5, "LeastAllocated"),  # duplicate combination, so only 3 are distinct
+        _good_combo_record(1.1, "LeastAllocated"),
+        _good_combo_record(1.1, "MostAllocated"),
     ]
 
-    text = run_pilot.format_results(results)
+    results = run_pilot.run_all_checks(**kwargs)
 
-    assert "[PASS] a: ok" in text
-    assert "[FAIL] b: went wrong" in text
+    check = next(r for r in results if r.name == "scenario3: the four records' (rho, scheduler) combinations are all distinct")
+    assert check.passed is False
+
+
+# --- scenario 4: report's per-run table, diff, figures ---
+
+
+def test_run_all_checks_flags_scenario4_when_a_referenced_figure_is_missing() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["existing_figures"] = {"figures/rho-0.5-wait.png"}  # rho-1.1-wait.png missing
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario4: every figure the report links to exists")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario4_when_the_diff_is_only_the_fallback_message() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = GOOD_REPORT_TEXT.replace(
+        "LeastAllocated − MostAllocated\n\n| metric | diff |\n| --- | --- |\n| cluster_std | 0.2 |",
+        "LeastAllocated と MostAllocated がどの入力の版でもそろわず、差を計算できなかった。",
+    )
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario4: every rho section has a real scheduler diff")
+    assert check.passed is False
+
+
+# --- scenario 5: negative control (ρ = 0.5) ---
+
+
+def test_run_all_checks_flags_scenario5_when_rho_0_5_has_no_negative_control_section() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = GOOD_REPORT_TEXT.split("### 陰性対照")[0] + "## ρ = 1.1\n"
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario5: rho = 0.5 has a negative-control section")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario5_when_fewer_than_two_schedulers_are_listed() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = GOOD_REPORT_TEXT.replace("- MostAllocated: 0.1200\n", "")
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario5: at least two schedulers' nonzero-wait fraction is shown")
+    assert check.passed is False
+
+
+def test_run_all_checks_counts_a_scheduler_name_containing_spaces_in_the_negative_control() -> None:
+    # aggregate.py's render_rho_markdown writes the real scheduler_profile
+    # value verbatim (schedulerprofile.Pilot's description, which has spaces
+    # and commas), not the bare "LeastAllocated"/"MostAllocated" GOOD_REPORT_TEXT
+    # otherwise uses. Found running against real openb data (units/U05.md's
+    # "先に抜き出す割合を小さくした入力で1回通す" step).
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = GOOD_REPORT_TEXT.replace(
+        "- LeastAllocated: 0.1000\n- MostAllocated: 0.1200\n",
+        "- NodeResourcesFit(scoringStrategy=LeastAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled: 0.1000\n"
+        "- NodeResourcesFit(scoringStrategy=MostAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled: 0.1200\n",
+    )
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario5: at least two schedulers' nonzero-wait fraction is shown")
+    assert check.passed is True
+
+
+# --- scenario 6: prediction and result (ρ = 1.1) ---
+
+
+def test_run_all_checks_flags_scenario6_when_rho_1_1_has_no_prediction_section() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = GOOD_REPORT_TEXT.split("### 予測と結果（高負荷）")[0]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario6: rho = 1.1 has a prediction-and-result section")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario6_when_the_unplaceable_free_row_is_missing() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = GOOD_REPORT_TEXT.replace("| unplaceable_free:cpu | 0.4000 | 当たった |\n", "")
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario6: an unplaceable-free prediction/result row is shown")
+    assert check.passed is False
+
+
+# --- sanity: counts ---
+
+
+def test_run_all_checks_flags_sanity_counts_when_created_count_does_not_match() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    records = kwargs["records"]
+    target = _find_record(records, 1.1, "LeastAllocated")
+    truncated = aggregate.RunRecord(header=target.header, transitions=[])  # no create_task at all
+    kwargs["records"] = [r if r is not target else truncated for r in records]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "sanity: created pod count matches the expected used-pod count (rho=1.1, LeastAllocated)")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_sanity_counts_when_a_pod_never_finishes() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    records = kwargs["records"]
+    target = _find_record(records, 1.1, "LeastAllocated")
+    b = _Builder()
+    b.register_node(0, "node-1", {"cpu": "10"})
+    b.create_task(0, "task-1", "instance-1")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})  # never completes
+    stuck = aggregate.RunRecord(header=target.header, transitions=b.transitions)
+    kwargs["records"] = [r if r is not target else stuck for r in records]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "sanity: every pod's final status is completed or pending (rho=1.1, LeastAllocated)")
+    assert check.passed is False
+
+
+# --- sanity: ranges ---
+#
+# Only ranges reachable through compute_metrics from *some* transition list
+# are exercised here. A negative pending wait time and a negative
+# unplaceable_free are not: compute_metrics sorts transitions by time before
+# replaying them, so a wait can never go negative, and
+# _is_fragmentation_blocked's "fits_aggregate" gate (free_sum >= a positive
+# request) can never fire while free_sum is negative, so a negative
+# unplaceable_free is never recorded either. Both checks still run (and pass)
+# on every well-formed record above; their failure branches are defensive
+# code with no reachable input, which this seam cannot exercise honestly.
+
+
+def test_run_all_checks_flags_sanity_ranges_when_allocation_rate_exceeds_one() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    records = kwargs["records"]
+    target = _find_record(records, 1.1, "LeastAllocated")
+    b = _Builder()
+    b.register_node(0, "node-1", {"cpu": "1"})  # tiny capacity
+    b.create_task(0, "task-1", "instance-1", cpu="5")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "5"})  # over-allocated: 5 > capacity 1
+    b.create_task(10, "task-2", "instance-2", cpu="0")  # marks the end of observation
+    overallocated = aggregate.RunRecord(header=target.header, transitions=b.transitions)
+    kwargs["records"] = [r if r is not target else overallocated for r in records]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "sanity: allocation_rate is within [0, 1] (rho=1.1, LeastAllocated)")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_sanity_ranges_when_a_metric_is_nan() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    records = kwargs["records"]
+    target = _find_record(records, 1.1, "LeastAllocated")
+    # A malformed allocated-resource quantity ("NaN", rather than a parseable
+    # one) is bad data a corrupted record could genuinely carry, unlike a
+    # negative wait or a negative unplaceable_free (see the module comment
+    # above): parse_quantity's fallback is float(value), which accepts "NaN".
+    # Lowercase "nan" will not do: it ends with "n" (parse_quantity's own
+    # nano-suffix letter), so it is parsed as float("na") * 1e-9 and raises
+    # instead of producing a NaN.
+    transitions = [
+        _transition("2024-01-01T00:00:00.000000000Z", 1, "register_node", "node-1", state="resource_capacity", after={"cpu": "10"}),
+        _create(0, 2, "task-1", "instance-1"),
+        _transition("2024-01-01T00:00:05.000000000Z", 3, "assign_node", "instance-1", state="assigned_node", task_id="task-1", after="node-1"),
+        _transition(
+            "2024-01-01T00:00:05.000000000Z",
+            4,
+            "assign_node",
+            "node-1",
+            state="allocated_resource",
+            task_id="task-1",
+            state_key="instance-1",
+            after={"cpu": "NaN"},
+        ),
+        _transition(
+            "2024-01-01T00:00:05.000000000Z",
+            5,
+            "start",
+            "instance-1",
+            state="instance_status",
+            task_id="task-1",
+            before="pending",
+            after="running",
+        ),
+        _create(10, 6, "task-2", "instance-2"),  # marks the end of observation
+    ]
+    broken = aggregate.RunRecord(header=target.header, transitions=transitions)
+    kwargs["records"] = [r if r is not target else broken for r in records]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "sanity: no metric is NaN (rho=1.1, LeastAllocated)")
+    assert check.passed is False
+
+
+# --- sanity: rho effect on allocation_rate ---
+
+
+def _single_resource_record(rho: float, scheduler_profile: str, resource: str, capacity: str, allocated: str) -> aggregate.RunRecord:
+    b = _Builder()
+    b.register_node(0, "node-1", {resource: capacity})
+    b.create_task(0, "task-1", "instance-1")
+    b.bind(5, "task-1", "instance-1", "node-1", {resource: allocated})
+    b.create_task(10, "task-2", "instance-2")  # marks the end of observation
+    return aggregate.RunRecord(header=_header(rho=rho, scheduler_profile=scheduler_profile), transitions=b.transitions)
+
+
+def test_run_all_checks_flags_rho_effect_when_allocation_rate_does_not_increase() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    replaced = {
+        (0.5, "LeastAllocated"): _single_resource_record(0.5, "LeastAllocated", "cpu", "10", "8"),  # 0.8
+        (1.1, "LeastAllocated"): _single_resource_record(1.1, "LeastAllocated", "cpu", "10", "2"),  # 0.2: lower at the higher rho
+    }
+    kwargs["records"] = [replaced.get((r.header.rho, r.header.scheduler_profile), r) for r in kwargs["records"]]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "sanity: rho effect on allocation_rate (LeastAllocated)")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_rho_effect_when_no_resource_is_common() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    replaced = {
+        (0.5, "LeastAllocated"): _single_resource_record(0.5, "LeastAllocated", "cpu", "10", "5"),
+        (1.1, "LeastAllocated"): _single_resource_record(1.1, "LeastAllocated", "memory", "10", "5"),
+    }
+    kwargs["records"] = [replaced.get((r.header.rho, r.header.scheduler_profile), r) for r in kwargs["records"]]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "sanity: rho effect on allocation_rate (LeastAllocated)")
+    assert check.passed is False
+
+
+def test_run_all_checks_rho_effect_ignores_a_resource_never_allocated_by_either_run() -> None:
+    # Found running against real openb data (units/U05.md's "先に抜き出す割合
+    # を小さくした入力で1回通す" step): every node's capacity carries a "pods"
+    # entry (scenarios/clusterdata/gpu2023.go's buildNode sets
+    # corev1.ResourcePods), but nothing ever allocates against it, so its
+    # allocation_rate is always exactly 0.0 regardless of rho. That resource
+    # must not count as "did not increase" when the resources that are
+    # actually exercised (here cpu) did increase as expected.
+    def record(rho: float, cpu_allocated: str) -> aggregate.RunRecord:
+        b = _Builder()
+        b.register_node(0, "node-1", {"cpu": "10", "pods": "110"})
+        b.create_task(0, "task-1", "instance-1", cpu=cpu_allocated)
+        b.bind(5, "task-1", "instance-1", "node-1", {"cpu": cpu_allocated})
+        b.create_task(10, "task-2", "instance-2", cpu="0")
+        return aggregate.RunRecord(header=_header(rho=rho, scheduler_profile="LeastAllocated"), transitions=b.transitions)
+
+    kwargs = _good_run_all_checks_kwargs()
+    replaced = {(0.5, "LeastAllocated"): record(0.5, "3"), (1.1, "LeastAllocated"): record(1.1, "8")}
+    kwargs["records"] = [replaced.get((r.header.rho, r.header.scheduler_profile), r) for r in kwargs["records"]]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "sanity: rho effect on allocation_rate (LeastAllocated)")
+    assert check.passed is True
+
+
+# --- sanity: scheduler effect on cluster_std ---
+
+
+def _record_with_running_distribution(rho: float, scheduler_profile: str, running_per_node: dict[str, int]) -> aggregate.RunRecord:
+    b = _Builder()
+    for node_id in running_per_node:
+        b.register_node(0, node_id, {"cpu": "100"})
+    pod_i = 0
+    for node_id, count in running_per_node.items():
+        for _ in range(count):
+            pod_i += 1
+            task_id, instance_id = f"task-{pod_i}", f"instance-{pod_i}"
+            b.create_task(0, task_id, instance_id, cpu="1")
+            b.bind(5, task_id, instance_id, node_id, {"cpu": "1"})
+    b.create_task(10, "task-end", "instance-end", cpu="0")  # marks the end of observation, stays pending
+    return aggregate.RunRecord(header=_header(rho=rho, scheduler_profile=scheduler_profile), transitions=b.transitions)
+
+
+def test_run_all_checks_flags_scheduler_effect_when_cluster_std_is_equal() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    replaced = {
+        (0.5, "LeastAllocated"): _record_with_running_distribution(0.5, "LeastAllocated", {"node-1": 1, "node-2": 1}),
+        (0.5, "MostAllocated"): _record_with_running_distribution(0.5, "MostAllocated", {"node-1": 1, "node-2": 1}),
+    }
+    kwargs["records"] = [replaced.get((r.header.rho, r.header.scheduler_profile), r) for r in kwargs["records"]]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == f"sanity: scheduler effect on cluster_std (rho={aggregate.RHO_NEGATIVE_CONTROL})")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scheduler_effect_when_least_allocated_has_the_bigger_std() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    replaced = {
+        (0.5, "LeastAllocated"): _record_with_running_distribution(0.5, "LeastAllocated", {"node-1": 2, "node-2": 0}),  # skewed
+        (0.5, "MostAllocated"): _record_with_running_distribution(0.5, "MostAllocated", {"node-1": 1, "node-2": 1}),  # even
+    }
+    kwargs["records"] = [replaced.get((r.header.rho, r.header.scheduler_profile), r) for r in kwargs["records"]]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == f"sanity: scheduler effect on cluster_std (rho={aggregate.RHO_NEGATIVE_CONTROL})")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scheduler_effect_when_cluster_std_is_not_measured() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    records = kwargs["records"]
+    target = _find_record(records, 0.5, "LeastAllocated")
+    b = _Builder()
+    b.create_task(0, "task-1", "instance-1")  # no register_node at all: no interval ever has a node to measure
+    unmeasured = aggregate.RunRecord(header=target.header, transitions=b.transitions)
+    kwargs["records"] = [r if r is not target else unmeasured for r in records]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == f"sanity: scheduler effect on cluster_std (rho={aggregate.RHO_NEGATIVE_CONTROL})")
+    assert check.passed is False
+
+
+# --- run (argv) ---
+
+
+def _write_record(path: Path, record: aggregate.RunRecord) -> None:
+    header = {
+        "evaluation_id": record.header.evaluation_id,
+        "scenario_id": record.header.scenario_id,
+        "iteration": record.header.iteration,
+        "input": {
+            "trace_name": record.header.trace_name,
+            "trace_version": record.header.trace_version,
+            "reference_commit": record.header.reference_commit,
+            "input_seed": record.header.input_seed,
+            "rho": record.header.rho,
+        },
+        "execution": {
+            "evaluator_commit": record.header.evaluator_commit,
+            "reference_commit": record.header.reference_commit,
+            "hardware": record.header.hardware,
+        },
+        "scheduler": {"profile": record.header.scheduler_profile},
+    }
+    lines = [json.dumps(header)]
+    for t in record.transitions:
+        lines.append(
+            json.dumps(
+                {
+                    "time": t.time,
+                    "seq": t.seq,
+                    "operation": t.operation,
+                    "component_id": t.component_id,
+                    "task_id": t.task_id,
+                    "state": t.state,
+                    "state_key": t.state_key,
+                    "before": t.before,
+                    "after": t.after,
+                    "task_immutable": t.task_immutable,
+                }
+            )
+        )
+    path.write_text("\n".join(lines) + "\n")
+
+
+_GOOD_BUILDINPUT_STDOUT = {
+    "0.5": "used pods:     1\nexcluded pods: 0\nfailed pods:   0\nrho (before):  0.3\nrho (after):   0.500000\n",
+    "1.1": "used pods:     1\nexcluded pods: 0\nfailed pods:   0\nrho (before):  0.3\nrho (after):   1.100000\n",
+}
+
+
+def _fake_subprocess(args: list[str]) -> SimpleNamespace:
+    """A fake for run()'s run_subprocess: answers "go run ./cmd/buildinput"
+    with a canned summary (so run() does not need a real openb CSV to parse
+    one from) and "go run ./cmd/runpilot" with success and no output, since
+    the test places the records cmd/runpilot would have written itself."""
+    if "./cmd/buildinput" in args:
+        rho = args[args.index("--rho") + 1]
+        return SimpleNamespace(returncode=0, stdout=_GOOD_BUILDINPUT_STDOUT[rho], stderr="")
+    if "./cmd/runpilot" in args:
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    raise AssertionError(f"unexpected run_subprocess call: {args}")
+
+
+def test_run_prints_pass_and_fail_lines_and_returns_nonzero_when_some_checks_fail(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    out_dir = tmp_path / "out"
+    records_dir = out_dir / "records"
+    records_dir.mkdir(parents=True)
+    # go run ./cmd/runpilot is faked to do nothing (see _fake_subprocess), so
+    # these four records stand in for what it would have written for the
+    # four (rho, scheduler) combinations.
+    for rho, scheduler in [(0.5, "LeastAllocated"), (0.5, "MostAllocated"), (1.1, "LeastAllocated"), (1.1, "MostAllocated")]:
+        _write_record(records_dir / f"rho{rho}-{scheduler}.jsonl", _good_combo_record(rho, scheduler))
+    nodes_csv, pods_csv = tmp_path / "nodes.csv", tmp_path / "openb_pod_list_test.csv"
+    nodes_csv.write_text("sn,cpu_milli,memory_mib,gpu,model\nnode-1,4000,8192,0,\n")
+    pods_csv.write_text(POD_CSV_HEADER + "pod-1,100,100,0,0,,BestEffort,Running,0,10,0\n")
+
+    exit_code = run_pilot.run(
+        ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--seed", "1", "--ratio", "1.0", "--out", str(out_dir)],
+        run_subprocess=_fake_subprocess,
+    )
+
+    captured = capsys.readouterr()
+    # _good_combo_record's single-pod fixtures can't exercise every Then/
+    # sanity check (there is no real rho or scheduler effect for them to
+    # show), so at least one check fails and run()'s exit code must reflect
+    # that (units/U05.md: "1つでも落ちていれば、0でない終了コードを返す"),
+    # while checks a minimal fixture *can* satisfy still pass and print as
+    # such — both lines must actually appear, not just one or the other.
+    assert "[PASS]" in captured.out
+    assert "[FAIL]" in captured.out
+    assert exit_code == 1
 
 
 # --- run (integration) ---
@@ -747,10 +867,7 @@ def test_run_builds_records_and_report_from_a_tiny_openb_style_csv(tmp_path: Pat
     # Exercises the whole wiring (go run ./cmd/buildinput x2, go run
     # ./cmd/runpilot, aggregate.run in-process) against a tiny hand-built
     # input, the same kind of fast dry run units/U05.md's "着手時に決める
-    # こと" calls for before scaling up to the full openb trace. This only
-    # checks that the pipeline produces its files without crashing; whether
-    # every Then and sanity check actually *passes* needs real openb-scale
-    # data (too few pods here to show a real rho or scheduler effect).
+    # こと" calls for before scaling up to the full openb trace.
     nodes_csv = tmp_path / "nodes.csv"
     # cmd/runpilot requires --pods' file name to start with "openb" (it reads
     # the trace version from it); a plainly-named "pods.csv" fails that check.
@@ -774,11 +891,23 @@ def test_run_builds_records_and_report_from_a_tiny_openb_style_csv(tmp_path: Pat
         ]
     )
 
-    assert isinstance(exit_code, int)
     record_files = list((out_dir / "records").glob("*.jsonl"))
     assert len(record_files) == 4
     assert (out_dir / "report" / "report.md").exists()
+    # This tiny, 4-pod input is too small to show a real rho or scheduler
+    # effect, or to sample a large-GPU-request pod for scenario 6, so a
+    # confirmed 3 of the 46 checks fail and exit_code is 1, not 0 — that is
+    # the expected result for *this* input, not an unrelated regression.
+    assert exit_code == 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
+    # "-m not integration" is always prepended, not only when no extra args
+    # are given: pytest keeps the *last* -m it is passed, so any extra args
+    # (e.g. run_checks.sh passing none at all, or a human adding "-q") still
+    # exclude the slow integration test by default, and only an explicit
+    # "-m ..." of the caller's own overrides it (e.g. "-m integration" to run
+    # only that one). A plain `len(sys.argv) > 1` check does not do this: it
+    # treated *any* extra argument, including "-q", as opting out of the
+    # default and ran the integration test anyway.
+    raise SystemExit(pytest.main([__file__, "-m", "not integration", *sys.argv[1:]]))
