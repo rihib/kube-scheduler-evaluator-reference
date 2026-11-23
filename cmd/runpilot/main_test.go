@@ -298,40 +298,18 @@ func TestRun_WritesOneRunPerComboAndIteration(t *testing.T) {
 	}
 }
 
-// pilotCPUSpreadNodesCSV has two equal-capacity nodes. memory capacity is
-// generously larger than any pod could ever request here, so every pod's
-// memory allocation ratio stays at 0 on both nodes no matter where it
-// lands; only cpu usage differs by placement, isolating cpu's contribution
-// to NodeResourcesFit's score from memory/gpu. Each node can host all four
-// pods in pilotCPUSpreadPodsCSV on its own by cpu alone (4*500 = 2000 <=
-// 2200), so LeastAllocated and MostAllocated disagree on how many nodes get
-// used.
-const pilotCPUSpreadNodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
-	"openb-node-0000,2200,999999,0,\n" +
-	"openb-node-0001,2200,999999,0,\n"
-
-// pilotCPUSpreadPodsCSV's four pods each request a quarter of one node's
-// cpu capacity and no memory/gpu, and stay running throughout
-// (deletion_time far past every creation_time), so all four coexist and
-// must all be scheduled.
-const pilotCPUSpreadPodsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n" +
-	"openb-pod-0000,500,0,0,0,,LS,Running,0,10000,0\n" +
-	"openb-pod-0001,500,0,0,0,,LS,Running,10,10000,10\n" +
-	"openb-pod-0002,500,0,0,0,,LS,Running,20,10000,20\n" +
-	"openb-pod-0003,500,0,0,0,,LS,Running,30,10000,30\n"
-
-// scheduler.WithProfiles(schedulerProfile) が実際にシナリオに渡っていなければ
-// （既定の scheduler のまま動けば）、LeastAllocated と MostAllocated の実行の
-// 置かれたノードの数に違いが出ない。ノードの数字は資源の使用率を均そうとする
-// LeastAllocated が2ノードに分け、使用率を高くまとめようとする
-// MostAllocated が1ノードに詰めることを利用する（配置先のノード名そのものは
-// 乱数で選ばれるので確かめない）。cpu 以外の資源を常に0にして同点にし、cpu が
-// 実際に採点へ効いていることだけを確かめる（memory は
-// TestRun_SchedulerProfileAffectsMemoryNodePlacement、gpu は
-// TestRun_SchedulerProfileAffectsGPUNodePlacement が対になって確かめる）。
-func TestRun_SchedulerProfileAffectsCPUNodePlacement(t *testing.T) {
-	nodesPath := writeTempCSV(t, "nodes.csv", pilotCPUSpreadNodesCSV)
-	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotCPUSpreadPodsCSV)
+// assertProfileSplitsNodes runs the pilot once over the given two-node CSVs
+// (one rho, one iteration, so one run per profile) and checks that the two
+// profiles disagree on how many nodes the pods landed on: LeastAllocated
+// spreads them over both nodes, MostAllocated packs them onto one. resource
+// names the resource the CSVs isolate, and only appears in failure messages.
+// Node names themselves are never checked, since kube-scheduler breaks ties
+// between equally-scored nodes at random (testing.md: "配置先のノード名を
+// 確かめない").
+func assertProfileSplitsNodes(t *testing.T, resource, nodesCSV, podsCSV string) {
+	t.Helper()
+	nodesPath := writeTempCSV(t, "nodes.csv", nodesCSV)
+	podsPath := writeTempCSV(t, pilotTestPodsFile, podsCSV)
 	store := &fakeRecordStore{}
 
 	var stderr bytes.Buffer
@@ -358,14 +336,46 @@ func TestRun_SchedulerProfileAffectsCPUNodePlacement(t *testing.T) {
 		switch label {
 		case "LeastAllocated":
 			if nodesUsed != 2 {
-				t.Errorf("LeastAllocated used %d node(s), want 2 (spread cpu usage across both nodes)", nodesUsed)
+				t.Errorf("LeastAllocated used %d node(s), want 2 (spread %s usage across both nodes)", nodesUsed, resource)
 			}
 		case "MostAllocated":
 			if nodesUsed != 1 {
-				t.Errorf("MostAllocated used %d node(s), want 1 (packed cpu usage onto one node)", nodesUsed)
+				t.Errorf("MostAllocated used %d node(s), want 1 (packed %s usage onto one node)", nodesUsed, resource)
 			}
 		}
 	}
+}
+
+// pilotCPUSpreadNodesCSV has two equal-capacity nodes. memory capacity is
+// generously larger than any pod could ever request here, so every pod's
+// memory allocation ratio stays at 0 on both nodes no matter where it
+// lands; only cpu usage differs by placement, isolating cpu's contribution
+// to NodeResourcesFit's score from memory/gpu. Each node can host all four
+// pods in pilotCPUSpreadPodsCSV on its own by cpu alone (4*500 = 2000 <=
+// 2200), so LeastAllocated and MostAllocated disagree on how many nodes get
+// used.
+const pilotCPUSpreadNodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
+	"openb-node-0000,2200,999999,0,\n" +
+	"openb-node-0001,2200,999999,0,\n"
+
+// pilotCPUSpreadPodsCSV's four pods each request a quarter of one node's
+// cpu capacity and no memory/gpu, and stay running throughout
+// (deletion_time far past every creation_time), so all four coexist and
+// must all be scheduled.
+const pilotCPUSpreadPodsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n" +
+	"openb-pod-0000,500,0,0,0,,LS,Running,0,10000,0\n" +
+	"openb-pod-0001,500,0,0,0,,LS,Running,10,10000,10\n" +
+	"openb-pod-0002,500,0,0,0,,LS,Running,20,10000,20\n" +
+	"openb-pod-0003,500,0,0,0,,LS,Running,30,10000,30\n"
+
+// scheduler.WithProfiles(schedulerProfile) が実際にシナリオに渡っていなければ
+// （既定の scheduler のまま動けば）、LeastAllocated と MostAllocated の実行の
+// 置かれたノードの数に違いが出ない。cpu 以外の資源を常に0にして同点にし、cpu が
+// 実際に採点へ効いていることだけを確かめる（memory は
+// TestRun_SchedulerProfileAffectsMemoryNodePlacement、gpu は
+// TestRun_SchedulerProfileAffectsGPUNodePlacement が対になって確かめる）。
+func TestRun_SchedulerProfileAffectsCPUNodePlacement(t *testing.T) {
+	assertProfileSplitsNodes(t, "cpu", pilotCPUSpreadNodesCSV, pilotCPUSpreadPodsCSV)
 }
 
 // pilotMemorySpreadNodesCSV has two equal-capacity nodes. cpu capacity is
@@ -400,42 +410,7 @@ const pilotMemorySpreadPodsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gp
 // 対になる（cpu と memory を同じ比率で消費するシナリオ1つでは、どちらかが
 // 採点から落ちても配置が変わらないので、資源ごとに分けて確かめる）。
 func TestRun_SchedulerProfileAffectsMemoryNodePlacement(t *testing.T) {
-	nodesPath := writeTempCSV(t, "nodes.csv", pilotMemorySpreadNodesCSV)
-	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotMemorySpreadPodsCSV)
-	store := &fakeRecordStore{}
-
-	var stderr bytes.Buffer
-	code := run([]string{
-		"--nodes=" + nodesPath,
-		"--pods=" + podsPath,
-		"--seed=1",
-		"--ratio=1.0",
-		"--rhos=0.5",
-		"--iterations=1",
-	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
-	}
-	if len(store.runs) != 2 { // 1 rho x 2 profiles x 1 iteration
-		t.Fatalf("run count = %d, want 2", len(store.runs))
-	}
-
-	for _, run := range store.runs {
-		sched, _ := run.header["scheduler"].(map[string]any)
-		profile, _ := sched["profile"].(string)
-		label := profileLabel(t, profile)
-		nodesUsed := len(run.assignedNodes)
-		switch label {
-		case "LeastAllocated":
-			if nodesUsed != 2 {
-				t.Errorf("LeastAllocated used %d node(s), want 2 (spread memory usage across both nodes)", nodesUsed)
-			}
-		case "MostAllocated":
-			if nodesUsed != 1 {
-				t.Errorf("MostAllocated used %d node(s), want 1 (packed memory usage onto one node)", nodesUsed)
-			}
-		}
-	}
+	assertProfileSplitsNodes(t, "memory", pilotMemorySpreadNodesCSV, pilotMemorySpreadPodsCSV)
 }
 
 // pilotGPUSpreadNodesCSV has two equal-capacity GPU nodes. cpu/memory
@@ -465,42 +440,7 @@ const pilotGPUSpreadPodsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_s
 // 確かめる。TestRun_SchedulerProfileAffectsCPUNodePlacement が cpu について
 // 確かめているのと対になる。
 func TestRun_SchedulerProfileAffectsGPUNodePlacement(t *testing.T) {
-	nodesPath := writeTempCSV(t, "nodes.csv", pilotGPUSpreadNodesCSV)
-	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotGPUSpreadPodsCSV)
-	store := &fakeRecordStore{}
-
-	var stderr bytes.Buffer
-	code := run([]string{
-		"--nodes=" + nodesPath,
-		"--pods=" + podsPath,
-		"--seed=1",
-		"--ratio=1.0",
-		"--rhos=0.5",
-		"--iterations=1",
-	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
-	}
-	if len(store.runs) != 2 { // 1 rho x 2 profiles x 1 iteration
-		t.Fatalf("run count = %d, want 2", len(store.runs))
-	}
-
-	for _, run := range store.runs {
-		sched, _ := run.header["scheduler"].(map[string]any)
-		profile, _ := sched["profile"].(string)
-		label := profileLabel(t, profile)
-		nodesUsed := len(run.assignedNodes)
-		switch label {
-		case "LeastAllocated":
-			if nodesUsed != 2 {
-				t.Errorf("LeastAllocated used %d node(s), want 2 (spread GPU usage across both nodes)", nodesUsed)
-			}
-		case "MostAllocated":
-			if nodesUsed != 1 {
-				t.Errorf("MostAllocated used %d node(s), want 1 (packed GPU usage onto one node)", nodesUsed)
-			}
-		}
-	}
+	assertProfileSplitsNodes(t, "nvidia.com/gpu", pilotGPUSpreadNodesCSV, pilotGPUSpreadPodsCSV)
 }
 
 // --iterations が0以下なら、記録が1つもできない実行を終了コード0で終わらせず
