@@ -21,6 +21,8 @@ Usage: uv run aggregate/run_pilot.py --out pilot-run
 
 from __future__ import annotations
 
+import csv
+import io
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,11 +96,12 @@ def count_eligible_pods(pods_csv_text: str) -> int:
     (scenarios/clusterdata/input_version.go). Used to compute the expected
     used-pod count independently of what buildinput itself reports
     (units/U05.md scenario 1's "Pendingを除いたPodの80%")."""
-    return 0
+    reader = csv.DictReader(io.StringIO(pods_csv_text))
+    return sum(1 for row in reader if row["pod_phase"].strip().lower() != "pending")
 
 
 def expected_sampled_count(eligible: int, ratio: float) -> int:
     """The used-pod count BuildInputVersion's sampleAndOrderPods computes:
     int(eligible * ratio + 0.5), i.e. round-half-up truncated toward zero,
     the same as Go's int() conversion."""
-    return 0
+    return int(eligible * ratio + 0.5)
