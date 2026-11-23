@@ -20,14 +20,9 @@ const pilotPodsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,p
 	"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n" +
 	"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n"
 
-func writeTempCSV(t *testing.T, name, content string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("failed to write %s: %v", path, err)
-	}
-	return path
-}
+// writeTempCSV is also defined, identically, in main_test.go: that file has
+// no build tag, so it is compiled together with this one whenever -tags
+// integration is passed, and redeclaring it here would be a build error.
 
 // recordHeader is the subset of the transition record's header line (units/U01.md)
 // this test needs to tell runs apart.
