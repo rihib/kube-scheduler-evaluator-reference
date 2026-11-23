@@ -265,6 +265,19 @@ func referenceCommitFrom(info *debug.BuildInfo) (commit string, found bool) {
 	return commit, true
 }
 
+// referenceCommitFromGit reports reference's own commit out of git's own
+// answers: "git rev-parse HEAD" for the commit, and "git status --porcelain"
+// for whether the working tree is dirty, in which case "-dirty" is appended
+// just as referenceCommitFrom does for a dirty build. Git is asked whenever
+// build info carries no vcs.revision, which is the normal case for how this
+// pilot is run ("go run ./cmd/runpilot", and the Makefile's "go build -o
+// bin/... cmd/main.go": only passing a package path to "go build" embeds vcs
+// information), so this is the path that usually decides whether the
+// record's header names a dirty tree.
+func referenceCommitFromGit(revParseOut, statusOut string) string {
+	return ""
+}
+
 // referenceCommit returns reference's own commit, the same way
 // record.EvaluatorCommit does for the evaluator module: build info's
 // vcs.revision when available (the normal "go build" case), falling back to

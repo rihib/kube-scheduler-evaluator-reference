@@ -99,6 +99,24 @@ func TestReferenceCommitFrom_MarksDirtyWhenVCSModified(t *testing.T) {
 	}
 }
 
+// git に問い合わせる経路では、git status --porcelain が空なら、
+// git rev-parse HEAD のコミットをそのまま使う。
+func TestReferenceCommitFromGit_UsesCommitWhenTreeIsClean(t *testing.T) {
+	if got := referenceCommitFromGit("abc123\n", ""); got != "abc123" {
+		t.Errorf("got %q, want %q", got, "abc123")
+	}
+}
+
+// git に問い合わせる経路でも、作業ツリーが汚れていれば（git status --porcelain
+// に行があれば）"-dirty" を付ける。ビルド情報に vcs.revision が無い形
+// （go run や、Makefile の go build）が普段の動かし方なので、この経路が
+// 付けないと、汚れたツリーの記録が汚れていないコミットを名乗る。
+func TestReferenceCommitFromGit_MarksDirtyWhenTreeIsDirty(t *testing.T) {
+	if got := referenceCommitFromGit("abc123\n", " M cmd/runpilot/main.go\n"); got != "abc123-dirty" {
+		t.Errorf("got %q, want %q", got, "abc123-dirty")
+	}
+}
+
 const pilotTestNodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
 	"openb-node-0000,32000,262144,0,\n"
 
