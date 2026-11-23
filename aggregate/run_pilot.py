@@ -115,4 +115,18 @@ def check_scenario1(summary: BuildInputSummary, *, eligible_pods: int, ratio: fl
     non-Pending pods, and the achieved rho matches the target
     (units/U05.md's "確かめ方": "使った件数が...80%であること", "求めたρが
     1.1であること")."""
-    return []
+    expected_used = expected_sampled_count(eligible_pods, ratio)
+    used_ok = summary.used_pods == expected_used
+    rho_ok = abs(summary.rho_after - target_rho) <= _RHO_TOLERANCE
+    return [
+        CheckResult(
+            name="scenario1: used pods is 80% of non-pending pods",
+            passed=used_ok,
+            detail="ok" if used_ok else f"expected {expected_used} used pods ({eligible_pods} eligible x {ratio}), got {summary.used_pods}",
+        ),
+        CheckResult(
+            name="scenario1: achieved rho matches the target",
+            passed=rho_ok,
+            detail="ok" if rho_ok else f"expected rho (after) == {target_rho}, got {summary.rho_after}",
+        ),
+    ]
