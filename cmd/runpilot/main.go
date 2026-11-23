@@ -33,3 +33,10 @@ func run(
 ) int {
 	return 0
 }
+
+// parseRhos splits a comma-separated list of target rho values.
+//
+// TODO(U03): not yet implemented.
+func parseRhos(s string) ([]float64, error) {
+	return nil, nil
+}
