@@ -192,4 +192,36 @@ def check_scenario4(report_text: str, *, existing_figures: set[str]) -> list[Che
     """spec.md scenario 4's Then: the report carries the per-run metrics table
     and a real scheduler diff for every rho section, and every figure the
     report links to actually exists (units/U05.md's "確かめ方")."""
-    return []
+    rho_sections = re.split(r"(?m)^## ρ = ", report_text)[1:]
+
+    metrics_ok = bool(rho_sections) and all(
+        "### 実行ごとのメトリクス" in s
+        and "pending_count_at_end" in s
+        and "cluster_std" in s
+        and "allocation_rate:" in s
+        and "unplaceable_free:" in s
+        for s in rho_sections
+    )
+    diff_ok = bool(rho_sections) and all("### スケジューラの差" in s and "| metric | diff |" in s for s in rho_sections)
+
+    referenced_figures = set(_FIGURE_REF_RE.findall(report_text))
+    missing_figures = referenced_figures - existing_figures
+    figures_ok = not missing_figures
+
+    return [
+        CheckResult(
+            name="scenario4: every rho section has the five-metric per-run table",
+            passed=metrics_ok,
+            detail="ok" if metrics_ok else "a rho section is missing the per-run metrics table or one of its columns",
+        ),
+        CheckResult(
+            name="scenario4: every rho section has a real scheduler diff",
+            passed=diff_ok,
+            detail="ok" if diff_ok else "a rho section's scheduler diff is the fallback message, not an actual diff table",
+        ),
+        CheckResult(
+            name="scenario4: every figure the report links to exists",
+            passed=figures_ok,
+            detail="ok" if figures_ok else f"missing figure file(s): {sorted(missing_figures)}",
+        ),
+    ]
