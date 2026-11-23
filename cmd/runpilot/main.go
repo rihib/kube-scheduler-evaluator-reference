@@ -284,8 +284,11 @@ func referenceCommitFromGit(revParseOut, statusOut string) string {
 
 // referenceCommit returns reference's own commit, the same way
 // record.EvaluatorCommit does for the evaluator module: build info's
-// vcs.revision when available (the normal "go build" case), falling back to
-// asking git directly for a "go test" binary, which does not carry one.
+// vcs.revision when available, falling back to asking git directly when it
+// is not. Only passing a package path to "go build" embeds vcs information,
+// so the git fallback covers more than a "go test" binary: "go run
+// ./cmd/runpilot" and the Makefile's "go build -o bin/... cmd/main.go" take
+// it too.
 func referenceCommit() (string, error) {
 	if info, ok := debug.ReadBuildInfo(); ok {
 		if commit, found := referenceCommitFrom(info); found {
