@@ -379,3 +379,11 @@ def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho
             detail="ok" if ok else f"allocation_rate did not increase from rho=0.5 to rho=1.1 for: {not_increased}",
         )
     ]
+
+
+def check_sanity_scheduler_effect(metrics_least_allocated: aggregate.Metrics, metrics_most_allocated: aggregate.Metrics) -> list[CheckResult]:
+    """units/U05.md's "スケジューラの効き方": at the same rho, LeastAllocated's
+    Cluster_std (lower is more evenly spread) is smaller than MostAllocated's,
+    standing in for "配置先が異なる" since node names are not compared
+    (testing.md: kube-scheduler breaks ties at random)."""
+    return []

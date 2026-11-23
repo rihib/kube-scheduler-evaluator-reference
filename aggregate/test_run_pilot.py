@@ -515,5 +515,44 @@ def test_check_sanity_rho_effect_fails_when_no_resource_is_common() -> None:
     assert any(not r.passed for r in results)
 
 
+# --- check_sanity_scheduler_effect ---
+
+
+def test_check_sanity_scheduler_effect_passes_when_least_allocated_spreads_more_evenly() -> None:
+    least = _metrics(cluster_std=0.1)
+    most = _metrics(cluster_std=0.4)
+
+    results = run_pilot.check_sanity_scheduler_effect(least, most)
+
+    assert all(r.passed for r in results)
+
+
+def test_check_sanity_scheduler_effect_fails_when_cluster_std_is_equal() -> None:
+    least = _metrics(cluster_std=0.2)
+    most = _metrics(cluster_std=0.2)
+
+    results = run_pilot.check_sanity_scheduler_effect(least, most)
+
+    assert any(not r.passed for r in results)
+
+
+def test_check_sanity_scheduler_effect_fails_when_least_allocated_has_the_bigger_std() -> None:
+    least = _metrics(cluster_std=0.5)
+    most = _metrics(cluster_std=0.2)
+
+    results = run_pilot.check_sanity_scheduler_effect(least, most)
+
+    assert any(not r.passed for r in results)
+
+
+def test_check_sanity_scheduler_effect_fails_when_cluster_std_was_not_measured() -> None:
+    least = _metrics(cluster_std=None)
+    most = _metrics(cluster_std=0.2)
+
+    results = run_pilot.check_sanity_scheduler_effect(least, most)
+
+    assert any(not r.passed for r in results)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
