@@ -554,5 +554,85 @@ def test_check_sanity_scheduler_effect_fails_when_cluster_std_was_not_measured()
     assert any(not r.passed for r in results)
 
 
+# --- check_sanity_rho_achieved ---
+
+
+def test_check_sanity_rho_achieved_passes_when_rho_after_matches_target() -> None:
+    summary = run_pilot.BuildInputSummary(used_pods=800, excluded_pods=200, failed_pods=12, rho_before=0.3, rho_after=0.5)
+
+    result = run_pilot.check_sanity_rho_achieved(summary, target_rho=0.5)
+
+    assert result.passed is True
+
+
+def test_check_sanity_rho_achieved_fails_when_rho_after_does_not_match_target() -> None:
+    summary = run_pilot.BuildInputSummary(used_pods=800, excluded_pods=200, failed_pods=12, rho_before=0.3, rho_after=0.45)
+
+    result = run_pilot.check_sanity_rho_achieved(summary, target_rho=0.5)
+
+    assert result.passed is False
+
+
+# --- run_all_checks ---
+
+
+def _good_combo_record(rho: float, scheduler_profile: str) -> aggregate.RunRecord:
+    """A minimal record good enough to pass every per-record check: one pod
+    created and completed, one node whose capacity is recorded up front."""
+    return aggregate.RunRecord(
+        header=_header(rho=rho, scheduler_profile=scheduler_profile),
+        transitions=[
+            _transition("2024-01-01T00:00:00.000000000Z", 1, "register_node", "node-1", state="resource_capacity", after={"cpu": "10"}),
+            _create(0, 2, "task-1", "instance-1"),
+            _transition(
+                "2024-01-01T00:00:05.000000000Z", 3, "start", "instance-1", state="instance_status", task_id="task-1", before="pending", after="running"
+            ),
+            _complete(10, 4, "task-1", "instance-1"),
+        ],
+    )
+
+
+def _good_run_all_checks_kwargs() -> dict:
+    return dict(
+        buildinput_summary_low_rho=run_pilot.BuildInputSummary(used_pods=1, excluded_pods=0, failed_pods=0, rho_before=0.3, rho_after=0.5),
+        buildinput_summary_high_rho=run_pilot.BuildInputSummary(used_pods=1, excluded_pods=0, failed_pods=0, rho_before=0.3, rho_after=1.1),
+        eligible_pods=1,
+        ratio=1.0,
+        records=[
+            _good_combo_record(0.5, "LeastAllocated"),
+            _good_combo_record(0.5, "MostAllocated"),
+            _good_combo_record(1.1, "LeastAllocated"),
+            _good_combo_record(1.1, "MostAllocated"),
+        ],
+        report_text=GOOD_REPORT_TEXT,
+        existing_figures={"figures/rho-0.5-wait.png", "figures/rho-1.1-wait.png"},
+    )
+
+
+def test_run_all_checks_returns_only_passing_results_for_well_formed_inputs() -> None:
+    # allocation_rate and cluster_std are not exercised meaningfully by
+    # _good_combo_record's single-pod runs (every run allocates the same
+    # amount for the same duration), so this only asserts that every check
+    # *ran* (no "material missing" placeholders), not that every one passed.
+    results = run_pilot.run_all_checks(**_good_run_all_checks_kwargs())
+
+    assert len(results) > 0
+    assert all("material missing" not in r.detail for r in results)
+
+
+def test_run_all_checks_reports_scenario2_material_missing_when_the_rho_1_1_least_allocated_record_is_absent() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["records"] = [r for r in kwargs["records"] if not (r.header.rho == 1.1 and r.header.scheduler_profile == "LeastAllocated")]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    # Every check that needed the missing record is reported as failed with
+    # "material missing" in its detail (units/U05.md: "前の段が落ちて後の項目
+    # の材料ができないときは、後の項目を「材料が無い」として落とす"), instead
+    # of raising or silently skipping.
+    scenario2_missing = next(r for r in results if r.name.startswith("scenario2") and "material missing" in r.detail)
+    assert scenario2_missing.passed is False
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

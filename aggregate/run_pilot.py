@@ -381,6 +381,13 @@ def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho
     ]
 
 
+def check_sanity_rho_achieved(summary: BuildInputSummary, *, target_rho: float) -> CheckResult:
+    """units/U05.md's "負荷の効き方": the achieved rho (buildinput's "rho
+    (after)") matches the target rho that run was built for. Reusable for
+    both rho=0.5 and rho=1.1 (scenario 1's own check only covers rho=1.1)."""
+    return CheckResult(name="placeholder", passed=False, detail="not implemented")
+
+
 def check_sanity_scheduler_effect(metrics_least_allocated: aggregate.Metrics, metrics_most_allocated: aggregate.Metrics) -> list[CheckResult]:
     """units/U05.md's "スケジューラの効き方": at the same rho, LeastAllocated's
     Cluster_std (lower is more evenly spread) is smaller than MostAllocated's,
@@ -404,3 +411,29 @@ def check_sanity_scheduler_effect(metrics_least_allocated: aggregate.Metrics, me
             detail="ok" if ok else f"expected cluster_std(LeastAllocated) < cluster_std(MostAllocated), got {least_std} >= {most_std}",
         )
     ]
+
+
+def run_all_checks(
+    *,
+    buildinput_summary_low_rho: BuildInputSummary,
+    buildinput_summary_high_rho: BuildInputSummary,
+    eligible_pods: int,
+    ratio: float,
+    records: Sequence[aggregate.RunRecord],
+    report_text: str,
+    existing_figures: set[str],
+) -> list[CheckResult]:
+    """Runs every spec.md Scenario 1-6 Then check and every units/U05.md
+    numeric sanity check against one pilot run's actual outputs. This is the
+    "検査とThenを確かめる処理" units/U05.md's Implementation Decisions commits
+    to keeping separate from the files themselves: every argument here is
+    already-parsed content, never a path, so this function never touches
+    disk and is fully exercised by small built, expected, and broken inputs.
+
+    When a check's input record is missing (the earlier pipeline stage that
+    should have produced it failed, or produced the wrong combination), that
+    check is reported as a single failed CheckResult naming what is missing,
+    instead of raising or being silently skipped (units/U05.md: "前の段が
+    落ちて後の項目の材料ができないときは、後の項目を「材料が無い」として
+    落とす")."""
+    return []
