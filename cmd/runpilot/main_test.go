@@ -2,26 +2,17 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/pfnet/kube-scheduler-evaluator/cmd/evaluator"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes/fake"
 	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
-	internalcache "k8s.io/kubernetes/pkg/scheduler/backend/cache"
-	"k8s.io/kubernetes/pkg/scheduler/framework/plugins"
-	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
-	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
-	schedmetrics "k8s.io/kubernetes/pkg/scheduler/metrics"
 )
 
 // --rhos はカンマ区切りの目標ρの一覧を、前後の空白を落として float64 の列にする。
@@ -105,95 +96,6 @@ func TestReferenceCommitFrom_MarksDirtyWhenVCSModified(t *testing.T) {
 	})
 	if !found || commit != "abc123-dirty" {
 		t.Errorf("got (%q, %v), want (\"abc123-dirty\", true)", commit, found)
-	}
-}
-
-// expandedPlugins reports the plugins frameworkruntime would actually run
-// for profile at every extension point, the same way scheduler.New does
-// internally (framework's expandMultiPointPlugins). This is the only way to
-// tell whether a change to profile.Plugins actually takes effect: in the
-// scheduler config types, MultiPoint.Disabled looks like it should disable a
-// plugin at every extension point but is silently ignored once
-// latest.Default() has already run (expandMultiPointPlugins reads each
-// extension point's own Disabled list instead), while e.g. Score.Disabled
-// works; and a plugin can be in effect (e.g. the default QueueSort plugin)
-// without profile.Plugins listing it explicitly at all, since the default
-// profile only lists plugins it overrides.
-func expandedPlugins(t *testing.T, profile schedulerconfig.KubeSchedulerProfile) *schedulerconfig.Plugins {
-	t.Helper()
-	schedmetrics.Register()
-	client := fake.NewSimpleClientset()
-	informerFactory := informers.NewSharedInformerFactory(client, 0)
-	f, err := frameworkruntime.NewFramework(context.Background(), plugins.NewInTreeRegistry(), &profile,
-		frameworkruntime.WithClientSet(client),
-		frameworkruntime.WithInformerFactory(informerFactory),
-		frameworkruntime.WithSnapshotSharedLister(internalcache.NewSnapshot(nil, nil)),
-	)
-	if err != nil {
-		t.Fatalf("frameworkruntime.NewFramework: %v", err)
-	}
-	return f.ListPlugins()
-}
-
-func pluginNames(set schedulerconfig.PluginSet) []string {
-	names := make([]string, len(set.Enabled))
-	for i, p := range set.Enabled {
-		names[i] = p.Name
-	}
-	return names
-}
-
-// kubeSchedulerProfile の返り値は、2つの方式がNodeResourcesFitの
-// ScoringStrategyに入り、資源がcpu・memory・nvidia.com/gpuの重み1になり、
-// NodeResourcesBalancedAllocationが実際に（frameworkruntimeが読む形で）
-// 無効になり、QueueSortなど確認していない拡張点は既定のまま残る。
-func TestKubeSchedulerProfile_ConfiguresScoringAndDisablesBalancedAllocation(t *testing.T) {
-	for _, strategy := range []schedulerconfig.ScoringStrategyType{schedulerconfig.LeastAllocated, schedulerconfig.MostAllocated} {
-		t.Run(string(strategy), func(t *testing.T) {
-			profile, err := kubeSchedulerProfile(strategy)
-			if err != nil {
-				t.Fatalf("kubeSchedulerProfile: %v", err)
-			}
-
-			var fitArgs *schedulerconfig.NodeResourcesFitArgs
-			for _, pc := range profile.PluginConfig {
-				if pc.Name == names.NodeResourcesFit {
-					fitArgs = pc.Args.(*schedulerconfig.NodeResourcesFitArgs)
-				}
-			}
-			if fitArgs == nil {
-				t.Fatalf("profile has no %s plugin config", names.NodeResourcesFit)
-			}
-			if fitArgs.ScoringStrategy.Type != strategy {
-				t.Errorf("ScoringStrategy.Type = %q, want %q", fitArgs.ScoringStrategy.Type, strategy)
-			}
-			wantResources := map[string]int64{"cpu": 1, "memory": 1, "nvidia.com/gpu": 1}
-			gotResources := map[string]int64{}
-			for _, r := range fitArgs.ScoringStrategy.Resources {
-				gotResources[r.Name] = r.Weight
-			}
-			if !reflect.DeepEqual(gotResources, wantResources) {
-				t.Errorf("ScoringStrategy.Resources = %v, want %v", gotResources, wantResources)
-			}
-
-			expanded := expandedPlugins(t, profile)
-			enabledScore := pluginNames(expanded.Score)
-			foundFit := false
-			for _, name := range enabledScore {
-				if name == names.NodeResourcesBalancedAllocation {
-					t.Errorf("enabled Score plugins = %v, must not contain %s", enabledScore, names.NodeResourcesBalancedAllocation)
-				}
-				if name == names.NodeResourcesFit {
-					foundFit = true
-				}
-			}
-			if !foundFit {
-				t.Errorf("enabled Score plugins = %v, want it to contain %s", enabledScore, names.NodeResourcesFit)
-			}
-			if len(pluginNames(expanded.QueueSort)) == 0 {
-				t.Errorf("no QueueSort plugin is enabled, want the default profile's queue sort plugin to survive untouched")
-			}
-		})
 	}
 }
 
@@ -434,6 +336,71 @@ func TestRun_SchedulerProfileAffectsNodePlacement(t *testing.T) {
 		case "MostAllocated":
 			if nodesUsed != 1 {
 				t.Errorf("MostAllocated used %d node(s), want 1 (packed onto one node)", nodesUsed)
+			}
+		}
+	}
+}
+
+// pilotGPUSpreadNodesCSV has two equal-capacity GPU nodes. cpu/memory
+// capacity is generously larger than any pod could ever request here, so
+// every pod's cpu and memory allocation ratio stays at 0 on both nodes no
+// matter where it lands; only gpu usage differs by placement, isolating
+// nvidia.com/gpu's contribution to NodeResourcesFit's score from cpu/memory.
+const pilotGPUSpreadNodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
+	"openb-node-0000,8000,8192,4,\n" +
+	"openb-node-0001,8000,8192,4,\n"
+
+// pilotGPUSpreadPodsCSV's four pods each request one GPU and no cpu/memory,
+// and stay running throughout (deletion_time far past every creation_time),
+// so all four coexist and must all be scheduled, together using exactly one
+// node's worth of GPUs (4*1 = 4).
+const pilotGPUSpreadPodsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n" +
+	"openb-pod-0000,0,0,1,0,,LS,Running,0,10000,0\n" +
+	"openb-pod-0001,0,0,1,0,,LS,Running,10,10000,10\n" +
+	"openb-pod-0002,0,0,1,0,,LS,Running,20,10000,20\n" +
+	"openb-pod-0003,0,0,1,0,,LS,Running,30,10000,30\n"
+
+// schedulerprofile.Pilot が NodeResourcesFit の ScoringStrategy に
+// nvidia.com/gpu を資源として入れていなければ、cpu も memory も使わない
+// このシナリオでは両ノードの採点が常に同点になり、LeastAllocated と
+// MostAllocated のどちらも置かれたノードの数に違いが出ない。GPU の資源が
+// 実際に採点へ効いていることを、置かれたノードの数（名前は見ない）で
+// 確かめる。main_test.go の TestRun_SchedulerProfileAffectsNodePlacement が
+// cpu/memory について確かめているのと対になる。
+func TestRun_SchedulerProfileAffectsGPUNodePlacement(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", pilotGPUSpreadNodesCSV)
+	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotGPUSpreadPodsCSV)
+	store := &fakeRecordStore{}
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+		"--seed=1",
+		"--ratio=1.0",
+		"--rhos=0.5",
+		"--iterations=1",
+	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	if len(store.runs) != 2 { // 1 rho x 2 profiles x 1 iteration
+		t.Fatalf("run count = %d, want 2", len(store.runs))
+	}
+
+	for _, run := range store.runs {
+		sched, _ := run.header["scheduler"].(map[string]any)
+		profile, _ := sched["profile"].(string)
+		label := profileLabel(t, profile)
+		nodesUsed := len(run.assignedNodes)
+		switch label {
+		case "LeastAllocated":
+			if nodesUsed != 2 {
+				t.Errorf("LeastAllocated used %d node(s), want 2 (spread GPU usage across both nodes)", nodesUsed)
+			}
+		case "MostAllocated":
+			if nodesUsed != 1 {
+				t.Errorf("MostAllocated used %d node(s), want 1 (packed GPU usage onto one node)", nodesUsed)
 			}
 		}
 	}

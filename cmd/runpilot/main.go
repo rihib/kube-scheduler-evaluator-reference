@@ -21,12 +21,11 @@ import (
 
 	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/clusterdata"
 	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/consts"
+	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/schedulerprofile"
 	"github.com/pfnet/kube-scheduler-evaluator/cmd/evaluator"
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 	"k8s.io/kubernetes/pkg/scheduler"
 	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
-	"k8s.io/kubernetes/pkg/scheduler/apis/config/latest"
-	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
 )
 
 // traceName identifies the input trace in the transition record's header
@@ -170,8 +169,8 @@ func pilotScenarios(nodesCSV, podsCSV []byte, opts pilotOptions) ([]definition.S
 		if err != nil {
 			return nil, err
 		}
-		for _, strategy := range pilotStrategies {
-			schedulerProfile, err := kubeSchedulerProfile(strategy)
+		for _, strategy := range schedulerprofile.Strategies {
+			profile, description, err := schedulerprofile.Pilot(strategy)
 			if err != nil {
 				return nil, err
 			}
@@ -181,11 +180,11 @@ func pilotScenarios(nodesCSV, podsCSV []byte, opts pilotOptions) ([]definition.S
 				ReferenceCommit:  opts.ReferenceCommit,
 				InputSeed:        strconv.FormatInt(opts.Seed, 10),
 				Rho:              rho,
-				SchedulerProfile: profileDescription(strategy),
+				SchedulerProfile: description,
 			}
 			scenarios = append(scenarios, evaluator.WithScenario(
 				scenarioID(rho, strategy), opts.Iterations, eventsGenerator(events), nil, identity,
-				scheduler.WithProfiles(schedulerProfile),
+				scheduler.WithProfiles(profile),
 			))
 		}
 	}
@@ -228,76 +227,6 @@ func parseRhos(s string) ([]float64, error) {
 		return nil, fmt.Errorf("--rhos must list at least one value, got %q", s)
 	}
 	return rhos, nil
-}
-
-// pilotStrategies are the NodeResourcesFit scoring strategies behind the two
-// scheduler profiles every rho is run against (units/U03.md Implementation
-// Decisions: "2つの profile を作る"). Both profiles score NodeResourcesFit by
-// cpu, memory and nvidia.com/gpu with weight 1, and disable
-// NodeResourcesBalancedAllocation's score so the scoring strategy is the only
-// thing that differs between them; every other plugin (filtering included)
-// is left at its default (units/U03.md).
-var pilotStrategies = []schedulerconfig.ScoringStrategyType{
-	schedulerconfig.LeastAllocated,
-	schedulerconfig.MostAllocated,
-}
-
-// kubeSchedulerProfile builds the scheduler profile config for one of
-// pilotStrategies, starting from the scheduler's own defaulted profile
-// (latest.Default(), the same defaulting a KubeSchedulerConfiguration file
-// goes through) so every plugin this pilot does not care about - including
-// the single-plugin extension points such as QueueSort - keeps its default
-// instead of being left empty. It only disables NodeResourcesBalancedAllocation's
-// score and replaces NodeResourcesFit's scoring strategy args (units/U03.md:
-// "ほかの採点は既定のまま残す"). It fails instead of silently leaving the
-// default scoring strategy in place if the default profile ever stops
-// carrying a NodeResourcesFit PluginConfig to replace.
-func kubeSchedulerProfile(strategy schedulerconfig.ScoringStrategyType) (schedulerconfig.KubeSchedulerProfile, error) {
-	cfg, err := latest.Default()
-	if err != nil {
-		return schedulerconfig.KubeSchedulerProfile{}, fmt.Errorf("failed to build the default scheduler profile: %w", err)
-	}
-	profile := *cfg.Profiles[0].DeepCopy()
-	// Plugins.Score.Disabled, not Plugins.MultiPoint.Disabled: expandMultiPointPlugins
-	// (k8s.io/kubernetes/pkg/scheduler/framework/runtime) builds each
-	// extension point's disabled set from that extension point's own
-	// Disabled list; MultiPoint.Disabled is only consulted by the v1
-	// defaulting latest.Default() already ran, so appending to it here
-	// would be silently ignored.
-	profile.Plugins.Score.Disabled = append(
-		profile.Plugins.Score.Disabled,
-		schedulerconfig.Plugin{Name: names.NodeResourcesBalancedAllocation},
-	)
-	configuredFit := false
-	for i, pc := range profile.PluginConfig {
-		if pc.Name != names.NodeResourcesFit {
-			continue
-		}
-		profile.PluginConfig[i].Args = &schedulerconfig.NodeResourcesFitArgs{
-			ScoringStrategy: &schedulerconfig.ScoringStrategy{
-				Type: strategy,
-				Resources: []schedulerconfig.ResourceSpec{
-					{Name: "cpu", Weight: 1},
-					{Name: "memory", Weight: 1},
-					{Name: "nvidia.com/gpu", Weight: 1},
-				},
-			},
-		}
-		configuredFit = true
-	}
-	if !configuredFit {
-		return schedulerconfig.KubeSchedulerProfile{}, fmt.Errorf("the default scheduler profile has no %s plugin config to replace", names.NodeResourcesFit)
-	}
-	return profile, nil
-}
-
-// profileDescription is the human-readable description of strategy written
-// to the transition record's header (definition.RunIdentity.SchedulerProfile).
-func profileDescription(strategy schedulerconfig.ScoringStrategyType) string {
-	return fmt.Sprintf(
-		"NodeResourcesFit(scoringStrategy=%s, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled",
-		strategy,
-	)
 }
 
 // scenarioID builds a scenario ID unique to one (rho, profile) combination.
