@@ -386,4 +386,21 @@ def check_sanity_scheduler_effect(metrics_least_allocated: aggregate.Metrics, me
     Cluster_std (lower is more evenly spread) is smaller than MostAllocated's,
     standing in for "配置先が異なる" since node names are not compared
     (testing.md: kube-scheduler breaks ties at random)."""
-    return []
+    least_std = metrics_least_allocated.cluster_std
+    most_std = metrics_most_allocated.cluster_std
+    if least_std is None or most_std is None:
+        return [
+            CheckResult(
+                name="sanity: scheduler effect on cluster_std",
+                passed=False,
+                detail=f"cluster_std not measured for one or both schedulers (LeastAllocated={least_std}, MostAllocated={most_std})",
+            )
+        ]
+    ok = least_std < most_std
+    return [
+        CheckResult(
+            name="sanity: scheduler effect on cluster_std",
+            passed=ok,
+            detail="ok" if ok else f"expected cluster_std(LeastAllocated) < cluster_std(MostAllocated), got {least_std} >= {most_std}",
+        )
+    ]
