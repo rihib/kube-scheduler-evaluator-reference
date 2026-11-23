@@ -66,7 +66,7 @@ _BUILDINPUT_FIELDS = {
 }
 
 
-def parse_buildinput_summary(text: str) -> BuildInputSummary:
+def _parse_buildinput_summary(text: str) -> BuildInputSummary:
     """Parses cmd/buildinput's "key:  value" stdout lines back into a
     BuildInputSummary. Raises ValueError naming the missing field(s) if the
     text does not carry every field buildinput's run() always prints on
@@ -93,7 +93,7 @@ def parse_buildinput_summary(text: str) -> BuildInputSummary:
     )
 
 
-def count_eligible_pods(pods_csv_text: str) -> int:
+def _count_eligible_pods(pods_csv_text: str) -> int:
     """Counts the pod CSV's rows BuildInputVersion samples from before applying
     sampleRatio: every row except the header and "Pending" ones
     (scenarios/clusterdata/input_version.go). Used to compute the expected
@@ -103,7 +103,7 @@ def count_eligible_pods(pods_csv_text: str) -> int:
     return sum(1 for row in reader if row["pod_phase"].strip().lower() != "pending")
 
 
-def expected_sampled_count(eligible: int, ratio: float) -> int:
+def _expected_sampled_count(eligible: int, ratio: float) -> int:
     """The used-pod count BuildInputVersion's sampleAndOrderPods computes:
     int(eligible * ratio + 0.5), i.e. round-half-up truncated toward zero,
     the same as Go's int() conversion."""
@@ -113,12 +113,12 @@ def expected_sampled_count(eligible: int, ratio: float) -> int:
 _RHO_TOLERANCE = 1e-6
 
 
-def check_scenario1(summary: BuildInputSummary, *, eligible_pods: int, ratio: float, target_rho: float) -> list[CheckResult]:
+def _check_scenario1(summary: BuildInputSummary, *, eligible_pods: int, ratio: float, target_rho: float) -> list[CheckResult]:
     """spec.md scenario 1's Then: the used-pod count is the sampled 80% of
     non-Pending pods, and the achieved rho matches the target
     (units/U05.md's "確かめ方": "使った件数が...80%であること", "求めたρが
     1.1であること")."""
-    expected_used = expected_sampled_count(eligible_pods, ratio)
+    expected_used = _expected_sampled_count(eligible_pods, ratio)
     used_ok = summary.used_pods == expected_used
     rho_ok = abs(summary.rho_after - target_rho) <= _RHO_TOLERANCE
     return [
@@ -135,7 +135,7 @@ def check_scenario1(summary: BuildInputSummary, *, eligible_pods: int, ratio: fl
     ]
 
 
-def check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
+def _check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
     """spec.md scenario 2's Then: the header names the input version's seed,
     rho, scheduler, both commits, and the hardware; the initial node capacity
     is recorded; and assign/complete transitions carry a non-decreasing
@@ -164,7 +164,7 @@ def check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
     ]
 
 
-def check_scenario3(records: Sequence[aggregate.RunRecord]) -> list[CheckResult]:
+def _check_scenario3(records: Sequence[aggregate.RunRecord]) -> list[CheckResult]:
     """spec.md scenario 3's Then: exactly four records exist, one per distinct
     (rho, scheduler profile) combination (units/U05.md's "確かめ方")."""
     count_ok = len(records) == 4
@@ -187,7 +187,7 @@ def check_scenario3(records: Sequence[aggregate.RunRecord]) -> list[CheckResult]
 _FIGURE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
 
-def check_scenario4(report_text: str, *, existing_figures: set[str]) -> list[CheckResult]:
+def _check_scenario4(report_text: str, *, existing_figures: set[str]) -> list[CheckResult]:
     """spec.md scenario 4's Then: the report carries the per-run metrics table
     and a real scheduler diff for every rho section, and every figure the
     report links to actually exists (units/U05.md's "確かめ方")."""
@@ -233,7 +233,7 @@ def _rho_section(report_text: str, rho_label: str) -> str | None:
     return match.group(1) if match else None
 
 
-def check_scenario5(report_text: str) -> list[CheckResult]:
+def _check_scenario5(report_text: str) -> list[CheckResult]:
     """spec.md scenario 5's Then: the ρ = 0.5 section shows the nonzero-wait
     fraction for (at least) two schedulers, and the wait-time diff between
     them (units/U05.md's "確かめ方")."""
@@ -269,7 +269,7 @@ def check_scenario5(report_text: str) -> list[CheckResult]:
     ]
 
 
-def check_scenario6(report_text: str) -> list[CheckResult]:
+def _check_scenario6(report_text: str) -> list[CheckResult]:
     """spec.md scenario 6's Then: the ρ = 1.1 section shows the prediction/result
     pairing for large-request pods' wait time and the unplaceable free amount
     (units/U05.md's "確かめ方")."""
@@ -296,7 +296,7 @@ def check_scenario6(report_text: str) -> list[CheckResult]:
     ]
 
 
-def check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int, label: str) -> list[CheckResult]:
+def _check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int, label: str) -> list[CheckResult]:
     """units/U05.md's "数が合う": every used pod has a create_task transition,
     and at the end of observation every pod is either "completed" or
     "pending" (not stuck "running" or, since this pilot has no preemption,
@@ -332,12 +332,12 @@ def check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int,
     ]
 
 
-def check_sanity_ranges(metrics: aggregate.Metrics, *, label: str) -> list[CheckResult]:
+def _check_sanity_ranges(metrics: aggregate.Metrics, *, label: str) -> list[CheckResult]:
     """units/U05.md's "値の範囲": wait times and unplaceable_free are >= 0,
     allocation_rate is within [0, 1], and no metric is NaN.
 
     label disambiguates the result across the four (rho, scheduler)
-    combinations the caller runs this for, the same reason check_sanity_counts
+    combinations the caller runs this for, the same reason _check_sanity_counts
     takes one."""
     all_waits = [w for waits in metrics.pending_wait_by_class.values() for w in waits]
     waits_ok = all(w >= 0 for w in all_waits)
@@ -378,7 +378,7 @@ def check_sanity_ranges(metrics: aggregate.Metrics, *, label: str) -> list[Check
     ]
 
 
-def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho: aggregate.Metrics, *, scheduler: str) -> list[CheckResult]:
+def _check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho: aggregate.Metrics, *, scheduler: str) -> list[CheckResult]:
     """units/U05.md's "負荷の効き方": for every resource both runs measured and
     at least one of them actually allocated against, the higher rho's
     allocation_rate is higher than the lower rho's (same scheduler profile,
@@ -424,7 +424,7 @@ def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho
     ]
 
 
-def check_sanity_rho_achieved(summary: BuildInputSummary, *, target_rho: float) -> CheckResult:
+def _check_sanity_rho_achieved(summary: BuildInputSummary, *, target_rho: float) -> CheckResult:
     """units/U05.md's "負荷の効き方": the achieved rho (buildinput's "rho
     (after)") matches the target rho that run was built for. Reusable for
     both rho=0.5 and rho=1.1 (scenario 1's own check only covers rho=1.1)."""
@@ -436,7 +436,7 @@ def check_sanity_rho_achieved(summary: BuildInputSummary, *, target_rho: float) 
     )
 
 
-def check_sanity_scheduler_effect(
+def _check_sanity_scheduler_effect(
     metrics_least_allocated: aggregate.Metrics, metrics_most_allocated: aggregate.Metrics, *, rho: float
 ) -> list[CheckResult]:
     """units/U05.md's "スケジューラの効き方": at the same rho, LeastAllocated's
@@ -493,9 +493,9 @@ def run_all_checks(
     落ちて後の項目の材料ができないときは、後の項目を「材料が無い」として
     落とす")."""
     results: list[CheckResult] = []
-    results += check_scenario1(buildinput_summary_high_rho, eligible_pods=eligible_pods, ratio=ratio, target_rho=aggregate.RHO_HIGH_LOAD)
-    results.append(check_sanity_rho_achieved(buildinput_summary_low_rho, target_rho=aggregate.RHO_NEGATIVE_CONTROL))
-    results.append(check_sanity_rho_achieved(buildinput_summary_high_rho, target_rho=aggregate.RHO_HIGH_LOAD))
+    results += _check_scenario1(buildinput_summary_high_rho, eligible_pods=eligible_pods, ratio=ratio, target_rho=aggregate.RHO_HIGH_LOAD)
+    results.append(_check_sanity_rho_achieved(buildinput_summary_low_rho, target_rho=aggregate.RHO_NEGATIVE_CONTROL))
+    results.append(_check_sanity_rho_achieved(buildinput_summary_high_rho, target_rho=aggregate.RHO_HIGH_LOAD))
 
     def find(rho: float, scheduler: str) -> aggregate.RunRecord | None:
         # scenarios/schedulerprofile.Pilot's description is not the bare
@@ -513,7 +513,7 @@ def run_all_checks(
         (aggregate.RHO_HIGH_LOAD, "LeastAllocated"),
         (aggregate.RHO_HIGH_LOAD, "MostAllocated"),
     ]
-    expected_pod_count = expected_sampled_count(eligible_pods, ratio)
+    expected_pod_count = _expected_sampled_count(eligible_pods, ratio)
     metrics_by_combo: dict[tuple[float, str], aggregate.Metrics] = {}
     for rho, scheduler in combos:
         record = find(rho, scheduler)
@@ -527,14 +527,14 @@ def run_all_checks(
             )
             continue
         label = f"rho={rho}, {scheduler}"
-        results += check_sanity_counts(record, expected_pod_count=expected_pod_count, label=label)
+        results += _check_sanity_counts(record, expected_pod_count=expected_pod_count, label=label)
         metrics = aggregate.compute_metrics(record.transitions)
         metrics_by_combo[(rho, scheduler)] = metrics
-        results += check_sanity_ranges(metrics, label=label)
+        results += _check_sanity_ranges(metrics, label=label)
 
     rec_high_least = find(aggregate.RHO_HIGH_LOAD, "LeastAllocated")
     if rec_high_least is not None:
-        results += check_scenario2(rec_high_least)
+        results += _check_scenario2(rec_high_least)
     else:
         results.append(
             CheckResult(
@@ -544,16 +544,16 @@ def run_all_checks(
             )
         )
 
-    results += check_scenario3(list(records))
-    results += check_scenario4(report_text, existing_figures=existing_figures)
-    results += check_scenario5(report_text)
-    results += check_scenario6(report_text)
+    results += _check_scenario3(list(records))
+    results += _check_scenario4(report_text, existing_figures=existing_figures)
+    results += _check_scenario5(report_text)
+    results += _check_scenario6(report_text)
 
     for scheduler in ("LeastAllocated", "MostAllocated"):
         m_low = metrics_by_combo.get((aggregate.RHO_NEGATIVE_CONTROL, scheduler))
         m_high = metrics_by_combo.get((aggregate.RHO_HIGH_LOAD, scheduler))
         if m_low is not None and m_high is not None:
-            results += check_sanity_rho_effect(m_low, m_high, scheduler=scheduler)
+            results += _check_sanity_rho_effect(m_low, m_high, scheduler=scheduler)
         else:
             results.append(
                 CheckResult(
@@ -567,7 +567,7 @@ def run_all_checks(
         m_least = metrics_by_combo.get((rho, "LeastAllocated"))
         m_most = metrics_by_combo.get((rho, "MostAllocated"))
         if m_least is not None and m_most is not None:
-            results += check_sanity_scheduler_effect(m_least, m_most, rho=rho)
+            results += _check_sanity_scheduler_effect(m_least, m_most, rho=rho)
         else:
             results.append(
                 CheckResult(
@@ -580,7 +580,7 @@ def run_all_checks(
     return results
 
 
-def format_results(results: Sequence[CheckResult]) -> str:
+def _format_results(results: Sequence[CheckResult]) -> str:
     """Renders every check's outcome as one line, so a failure's reason is
     visible without re-reading this module (units/U05.md: "項目ごとに通ったか
     落ちたかを、落ちた理由とともに表示する")."""
@@ -640,7 +640,7 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
     except OSError as e:
         print(f"run_pilot: failed to read {args.pods}: {e}", file=sys.stderr)
         return 1
-    eligible_pods = count_eligible_pods(pods_text)
+    eligible_pods = _count_eligible_pods(pods_text)
 
     summaries: dict[float, BuildInputSummary] = {}
     for rho in _PILOT_RHOS:
@@ -666,7 +666,7 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
             summaries[rho] = _MISSING_BUILDINPUT_SUMMARY
             continue
         try:
-            summaries[rho] = parse_buildinput_summary(proc.stdout)
+            summaries[rho] = _parse_buildinput_summary(proc.stdout)
         except ValueError as e:
             print(f"run_pilot: could not parse buildinput's output for rho={rho}: {e}", file=sys.stderr)
             summaries[rho] = _MISSING_BUILDINPUT_SUMMARY
@@ -732,7 +732,7 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
         existing_figures=existing_figures,
     )
 
-    print(format_results(results))
+    print(_format_results(results))
     failed = [r for r in results if not r.passed]
     print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")
     return 1 if failed else 0

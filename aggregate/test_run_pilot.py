@@ -268,15 +268,66 @@ def _good_run_all_checks_kwargs() -> dict:
     }
 
 
+def _fully_passing_record(rho: float, scheduler_profile: str, running_per_node: dict[str, int], cpu_allocated: str) -> aggregate.RunRecord:
+    """Builds a record crafted to pass every per-record and per-combination
+    check at once: running_per_node's pods are created, bound, and completed
+    well before the observation ends (so cluster_std and allocation_rate are
+    both measured over a real interval, and every pod's final status is
+    "completed", not left "running" the way _good_combo_record's sibling
+    helpers leave theirs for simpler, single-purpose fixtures)."""
+    node_per_pod = [node_id for node_id, count in running_per_node.items() for _ in range(count)]
+    pods = [(f"task-{i}", f"instance-{i}", node_id) for i, node_id in enumerate(node_per_pod, start=1)]
+    # Written one *phase* at a time (every create_task at t=0, then every
+    # bind at t=5, then every complete at t=8), not pod by pod: writing a
+    # whole pod's create/bind/complete before moving to the next pod would
+    # make the raw transition list jump from t=8 (one pod's complete) back
+    # to t=0 (the next pod's create), breaking check_scenario2's "transitions
+    # carry non-decreasing virtual time" — found writing this fixture.
+    b = _Builder()
+    for node_id in running_per_node:
+        b.register_node(0, node_id, {"cpu": "100"})
+    for task_id, instance_id, _ in pods:
+        b.create_task(0, task_id, instance_id, cpu=cpu_allocated)
+    for task_id, instance_id, node_id in pods:
+        b.bind(5, task_id, instance_id, node_id, {"cpu": cpu_allocated})
+    for task_id, instance_id, node_id in pods:
+        b.complete(8, task_id, instance_id, node_id, {"cpu": cpu_allocated})
+    b.create_task(10, "task-end", "instance-end", cpu="0")  # stays pending; marks the end of observation
+    return aggregate.RunRecord(header=_header(rho=rho, scheduler_profile=scheduler_profile), transitions=b.transitions)
+
+
+def _fully_passing_run_all_checks_kwargs() -> dict:
+    """A fixture built to make every single check in run_all_checks pass, not
+    just run without "material missing" (rihib:interface-judge round 2):
+    each (rho, scheduler) combination creates the same 3 pods (2 running + 1
+    left pending, matching eligible_pods=3 x ratio=1.0 below), so sanity
+    counts match everywhere; LeastAllocated always spreads its 2 running pods
+    one-per-node while MostAllocated always stacks both on one node, so
+    cluster_std(LeastAllocated) < cluster_std(MostAllocated) at both rhos;
+    and every scheduler's allocated cpu per pod is higher at ρ = 1.1 than at
+    ρ = 0.5, so allocation_rate increases with rho for both schedulers."""
+    return {
+        "buildinput_summary_low_rho": run_pilot.BuildInputSummary(used_pods=3, excluded_pods=0, failed_pods=0, rho_before=0.3, rho_after=0.5),
+        "buildinput_summary_high_rho": run_pilot.BuildInputSummary(used_pods=3, excluded_pods=0, failed_pods=0, rho_before=0.3, rho_after=1.1),
+        "eligible_pods": 3,
+        "ratio": 1.0,
+        "records": [
+            _fully_passing_record(0.5, "LeastAllocated", {"node-1": 1, "node-2": 1}, cpu_allocated="1"),
+            _fully_passing_record(0.5, "MostAllocated", {"node-1": 2, "node-2": 0}, cpu_allocated="1"),
+            _fully_passing_record(1.1, "LeastAllocated", {"node-1": 1, "node-2": 1}, cpu_allocated="4"),
+            _fully_passing_record(1.1, "MostAllocated", {"node-1": 2, "node-2": 0}, cpu_allocated="4"),
+        ],
+        "report_text": GOOD_REPORT_TEXT,
+        "existing_figures": {"figures/rho-0.5-wait.png", "figures/rho-1.1-wait.png"},
+    }
+
+
 def test_run_all_checks_returns_only_passing_results_for_well_formed_inputs() -> None:
-    # allocation_rate and cluster_std are not exercised meaningfully by
-    # _good_combo_record's single-pod runs (every run allocates the same
-    # amount for the same duration), so this only asserts that every check
-    # *ran* (no "material missing" placeholders), not that every one passed.
-    results = run_pilot.run_all_checks(**_good_run_all_checks_kwargs())
+    results = run_pilot.run_all_checks(**_fully_passing_run_all_checks_kwargs())
 
     assert len(results) > 0
-    assert all("material missing" not in r.detail for r in results)
+    failed = [r for r in results if not r.passed]
+    assert all(r.passed for r in results), failed
 
 
 def test_run_all_checks_reports_scenario2_material_missing_when_the_rho_1_1_least_allocated_record_is_absent() -> None:
@@ -288,9 +339,23 @@ def test_run_all_checks_reports_scenario2_material_missing_when_the_rho_1_1_leas
     # Every check that needed the missing record is reported as failed with
     # "material missing" in its detail (units/U05.md: "前の段が落ちて後の項目
     # の材料ができないときは、後の項目を「材料が無い」として落とす"), instead
-    # of raising or silently skipping.
-    scenario2_missing = next(r for r in results if r.name.startswith("scenario2") and "material missing" in r.detail)
-    assert scenario2_missing.passed is False
+    # of raising or silently skipping. Four distinct checks need this one
+    # record: the sanity record-exists check itself, scenario 2 (which only
+    # ever looks at the ρ=1.1/LeastAllocated record), the ρ=1.1/LeastAllocated
+    # side of the rho-effect comparison, and the ρ=1.1 side of the
+    # scheduler-effect comparison — each must be named and asserted
+    # individually, since a single assertion could pass by matching only one
+    # of the four while the other three silently raised or were skipped.
+    missing_names = [
+        "sanity: record for rho=1.1, LeastAllocated exists",
+        "scenario2: record for rho=1.1, LeastAllocated exists",
+        "sanity: rho effect on allocation_rate (LeastAllocated)",
+        "sanity: scheduler effect on cluster_std (rho=1.1)",
+    ]
+    for name in missing_names:
+        check = next(r for r in results if r.name == name)
+        assert check.passed is False
+        assert "material missing" in check.detail
 
 
 def test_run_all_checks_matches_records_whose_scheduler_profile_is_the_full_description() -> None:
@@ -455,6 +520,26 @@ def test_run_all_checks_flags_scenario4_when_the_diff_is_only_the_fallback_messa
     assert check.passed is False
 
 
+def test_run_all_checks_flags_scenario4_when_the_per_run_table_is_missing() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    # GOOD_REPORT_TEXT's two rho sections share the exact same per-run table
+    # text; replace(..., 1) drops only the first occurrence (ρ = 0.5's),
+    # leaving ρ = 1.1's intact, so only one of the two rho sections is broken.
+    kwargs["report_text"] = GOOD_REPORT_TEXT.replace(
+        "### 実行ごとのメトリクス\n\n"
+        "| scheduler | iteration | pending_count_at_end | cluster_std | nonzero_wait_fraction | allocation_rate:cpu | unplaceable_free:cpu |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| LeastAllocated | 0 | 0 | 0.5 | 0.1 | 0.3 | 0.0 |\n\n",
+        "",
+        1,
+    )
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario4: every rho section has the five-metric per-run table")
+    assert check.passed is False
+
+
 # --- scenario 5: negative control (ρ = 0.5) ---
 
 
@@ -475,6 +560,16 @@ def test_run_all_checks_flags_scenario5_when_fewer_than_two_schedulers_are_liste
     results = run_pilot.run_all_checks(**kwargs)
 
     check = next(r for r in results if r.name == "scenario5: at least two schedulers' nonzero-wait fraction is shown")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario5_when_the_wait_time_diff_is_missing() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = GOOD_REPORT_TEXT.replace("待機時間の差:\n\n- wait:0: 0.3000\n\n", "")
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario5: the wait-time diff between schedulers is shown")
     assert check.passed is False
 
 
@@ -517,6 +612,16 @@ def test_run_all_checks_flags_scenario6_when_the_unplaceable_free_row_is_missing
     results = run_pilot.run_all_checks(**kwargs)
 
     check = next(r for r in results if r.name == "scenario6: an unplaceable-free prediction/result row is shown")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario6_when_the_wait_row_is_missing() -> None:
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = GOOD_REPORT_TEXT.replace("| wait:8 | 0.5000 | 当たった |\n", "")
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario6: a large-request wait-time prediction/result row is shown")
     assert check.passed is False
 
 
@@ -800,23 +905,29 @@ def _write_record(path: Path, record: aggregate.RunRecord) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
-_GOOD_BUILDINPUT_STDOUT = {
-    "0.5": "used pods:     1\nexcluded pods: 0\nfailed pods:   0\nrho (before):  0.3\nrho (after):   0.500000\n",
-    "1.1": "used pods:     1\nexcluded pods: 0\nfailed pods:   0\nrho (before):  0.3\nrho (after):   1.100000\n",
-}
+def _buildinput_stdout(used_pods: int, rho_after: float) -> str:
+    return f"used pods:     {used_pods}\nexcluded pods: 0\nfailed pods:   0\nrho (before):  0.3\nrho (after):   {rho_after:.6f}\n"
 
 
-def _fake_subprocess(args: list[str]) -> SimpleNamespace:
-    """A fake for run()'s run_subprocess: answers "go run ./cmd/buildinput"
+_GOOD_BUILDINPUT_STDOUT = {"0.5": _buildinput_stdout(1, 0.5), "1.1": _buildinput_stdout(1, 1.1)}
+_FULLY_PASSING_BUILDINPUT_STDOUT = {"0.5": _buildinput_stdout(3, 0.5), "1.1": _buildinput_stdout(3, 1.1)}
+
+
+def _make_fake_subprocess(buildinput_stdout_by_rho: dict[str, str]):
+    """Builds a fake for run()'s run_subprocess: answers "go run ./cmd/buildinput"
     with a canned summary (so run() does not need a real openb CSV to parse
     one from) and "go run ./cmd/runpilot" with success and no output, since
     the test places the records cmd/runpilot would have written itself."""
-    if "./cmd/buildinput" in args:
-        rho = args[args.index("--rho") + 1]
-        return SimpleNamespace(returncode=0, stdout=_GOOD_BUILDINPUT_STDOUT[rho], stderr="")
-    if "./cmd/runpilot" in args:
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-    raise AssertionError(f"unexpected run_subprocess call: {args}")
+
+    def fake(args: list[str]) -> SimpleNamespace:
+        if "./cmd/buildinput" in args:
+            rho = args[args.index("--rho") + 1]
+            return SimpleNamespace(returncode=0, stdout=buildinput_stdout_by_rho[rho], stderr="")
+        if "./cmd/runpilot" in args:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected run_subprocess call: {args}")
+
+    return fake
 
 
 def test_run_prints_pass_and_fail_lines_and_returns_nonzero_when_some_checks_fail(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -834,7 +945,7 @@ def test_run_prints_pass_and_fail_lines_and_returns_nonzero_when_some_checks_fai
 
     exit_code = run_pilot.run(
         ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--seed", "1", "--ratio", "1.0", "--out", str(out_dir)],
-        run_subprocess=_fake_subprocess,
+        run_subprocess=_make_fake_subprocess(_GOOD_BUILDINPUT_STDOUT),
     )
 
     captured = capsys.readouterr()
@@ -847,6 +958,82 @@ def test_run_prints_pass_and_fail_lines_and_returns_nonzero_when_some_checks_fai
     assert "[PASS]" in captured.out
     assert "[FAIL]" in captured.out
     assert exit_code == 1
+
+
+def test_run_returns_zero_and_prints_only_pass_lines_when_every_check_passes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Reusing _fully_passing_run_all_checks_kwargs's records as-is does not
+    # reach exit_code == 0 here: unlike run_all_checks (which takes
+    # report_text/existing_figures directly), run() generates the report for
+    # real from these records via aggregate.run(), which (1) needs each
+    # record's scheduler_profile to equal run()'s own --distributed-scheduler
+    # value exactly (the full schedulerprofile.Pilot description, not the
+    # bare name _fully_passing_record uses) for scenario 6's prediction
+    # section to resolve at all, and (2) needs an actual GPU-8 class and
+    # resource-fragmentation scenario in the data for that section's wait:8/
+    # unplaceable_free rows to have something to show. Found while
+    # attempting the reuse the round-2 review suggested; this dedicated
+    # fixture adds both instead of changing the shared one every other test
+    # in this file already relies on.
+    least_desc = run_pilot._LEAST_ALLOCATED_DESCRIPTION
+    most_desc = (
+        "NodeResourcesFit(scoringStrategy=MostAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled"
+    )
+
+    def record(rho: float, scheduler_profile: str, running_per_node: dict[str, int], cpu_allocated: str) -> aggregate.RunRecord:
+        node_per_pod = [node_id for node_id, count in running_per_node.items() for _ in range(count)]
+        pods = [(f"task-{i}", f"instance-{i}", node_id) for i, node_id in enumerate(node_per_pod, start=1)]
+        b = _Builder()
+        for node_id in running_per_node:
+            b.register_node(0, node_id, {"cpu": "100"})
+        for task_id, instance_id, _ in pods:
+            b.create_task(0, task_id, instance_id, cpu=cpu_allocated)
+        # Stays pending the whole time: too large (150 cpu) for either
+        # 100-cpu node alone, but fits the cluster's combined free cpu, so it
+        # fragments (scenario 6's unplaceable_free row); its GPU-8 request
+        # also gives scenario 6's wait:8 row a nonzero, right-censored wait.
+        b.create_task(0, "task-large", "instance-large", cpu="150", gpu="8")
+        for task_id, instance_id, node_id in pods:
+            b.bind(5, task_id, instance_id, node_id, {"cpu": cpu_allocated})
+        for task_id, instance_id, node_id in pods:
+            b.complete(8, task_id, instance_id, node_id, {"cpu": cpu_allocated})
+        b.create_task(10, "task-end", "instance-end", cpu="0")  # stays pending; marks the end of observation
+        return aggregate.RunRecord(header=_header(rho=rho, scheduler_profile=scheduler_profile), transitions=b.transitions)
+
+    records = [
+        record(0.5, least_desc, {"node-1": 1, "node-2": 1}, cpu_allocated="1"),
+        record(0.5, most_desc, {"node-1": 2, "node-2": 0}, cpu_allocated="1"),
+        record(1.1, least_desc, {"node-1": 1, "node-2": 1}, cpu_allocated="4"),
+        record(1.1, most_desc, {"node-1": 2, "node-2": 0}, cpu_allocated="4"),
+    ]
+
+    out_dir = tmp_path / "out"
+    records_dir = out_dir / "records"
+    records_dir.mkdir(parents=True)
+    for i, r in enumerate(records):
+        _write_record(records_dir / f"record-{i}.jsonl", r)
+    nodes_csv, pods_csv = tmp_path / "nodes.csv", tmp_path / "openb_pod_list_test.csv"
+    nodes_csv.write_text("sn,cpu_milli,memory_mib,gpu,model\nnode-1,4000,8192,0,\n")
+    # Every record above creates 4 pods (2 running + 1 large-pending + 1
+    # marker); eligible_pods=4 x ratio=1.0 behind the summary below needs the
+    # same count of non-Pending rows here (run() derives eligible_pods from
+    # this CSV itself, not from the records).
+    pods_csv.write_text(
+        POD_CSV_HEADER
+        + "pod-1,100,100,0,0,,BestEffort,Running,0,10,0\n"
+        + "pod-2,100,100,0,0,,BestEffort,Running,0,10,0\n"
+        + "pod-3,100,100,0,0,,BestEffort,Running,0,10,0\n"
+        + "pod-4,100,100,0,0,,BestEffort,Running,0,10,0\n"
+    )
+
+    exit_code = run_pilot.run(
+        ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--seed", "1", "--ratio", "1.0", "--out", str(out_dir)],
+        run_subprocess=_make_fake_subprocess({"0.5": _buildinput_stdout(4, 0.5), "1.1": _buildinput_stdout(4, 1.1)}),
+    )
+
+    captured = capsys.readouterr()
+    assert "[PASS]" in captured.out
+    assert "[FAIL]" not in captured.out, captured.out
+    assert exit_code == 0
 
 
 # --- run (integration) ---
