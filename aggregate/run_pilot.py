@@ -167,4 +167,18 @@ def check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
 def check_scenario3(records: Sequence[aggregate.RunRecord]) -> list[CheckResult]:
     """spec.md scenario 3's Then: exactly four records exist, one per distinct
     (rho, scheduler profile) combination (units/U05.md's "確かめ方")."""
-    return []
+    count_ok = len(records) == 4
+    combos = [(r.header.rho, r.header.scheduler_profile) for r in records]
+    distinct_ok = len(set(combos)) == len(combos)
+    return [
+        CheckResult(
+            name="scenario3: four records exist",
+            passed=count_ok,
+            detail="ok" if count_ok else f"expected 4 records, got {len(records)}",
+        ),
+        CheckResult(
+            name="scenario3: the four records' (rho, scheduler) combinations are all distinct",
+            passed=distinct_ok,
+            detail="ok" if distinct_ok else f"combinations are not all distinct: {combos}",
+        ),
+    ]
