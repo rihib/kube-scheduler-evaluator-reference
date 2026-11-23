@@ -523,6 +523,23 @@ def test_check_sanity_rho_effect_fails_when_no_resource_is_common() -> None:
     assert any(not r.passed for r in results)
 
 
+def test_check_sanity_rho_effect_ignores_a_resource_never_allocated_by_either_run() -> None:
+    # Found running against real openb data (units/U05.md's "先に抜き出す割合
+    # を小さくした入力で1回通す" step): every node's capacity carries a "pods"
+    # entry (scenarios/clusterdata/gpu2023.go's buildNode sets
+    # corev1.ResourcePods), but nothing ever allocates against it (only cpu/
+    # memory/gpu get allocated_resource transitions), so its allocation_rate
+    # is always exactly 0.0 regardless of rho. That resource must not count
+    # as "did not increase" when the resources that are actually exercised
+    # (here cpu) did increase as expected.
+    low = _metrics(allocation_rate={"cpu": 0.3, "pods": 0.0})
+    high = _metrics(allocation_rate={"cpu": 0.6, "pods": 0.0})
+
+    results = run_pilot.check_sanity_rho_effect(low, high)
+
+    assert all(r.passed for r in results)
+
+
 # --- check_sanity_scheduler_effect ---
 
 
