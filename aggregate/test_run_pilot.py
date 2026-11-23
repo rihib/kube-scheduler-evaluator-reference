@@ -649,5 +649,20 @@ def test_run_all_checks_reports_scenario2_material_missing_when_the_rho_1_1_leas
     assert scenario2_missing.passed is False
 
 
+# --- format_results ---
+
+
+def test_format_results_marks_each_result_pass_or_fail_with_its_detail() -> None:
+    results = [
+        run_pilot.CheckResult(name="a", passed=True, detail="ok"),
+        run_pilot.CheckResult(name="b", passed=False, detail="went wrong"),
+    ]
+
+    text = run_pilot.format_results(results)
+
+    assert "[PASS] a: ok" in text
+    assert "[FAIL] b: went wrong" in text
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
