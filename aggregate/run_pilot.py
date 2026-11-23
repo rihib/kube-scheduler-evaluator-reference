@@ -242,7 +242,12 @@ def check_scenario5(report_text: str) -> list[CheckResult]:
     fraction_block = ""
     if has_section and "待機時間が0でないPodの割合:" in section:
         fraction_block = section.split("待機時間が0でないPodの割合:", 1)[1].split("待機時間の差:")[0]
-    scheduler_count = len(re.findall(r"(?m)^- \S+: ", fraction_block))
+    # ".+" (not "\S+"): a real scheduler_profile is a long description with
+    # spaces (schedulerprofile.Pilot's "NodeResourcesFit(scoringStrategy=
+    # LeastAllocated, ...); NodeResourcesBalancedAllocation disabled"), not a
+    # single bare token — found running against real openb data
+    # (units/U05.md's "先に抜き出す割合を小さくした入力で1回通す" step).
+    scheduler_count = len(re.findall(r"(?m)^- .+: ", fraction_block))
     has_two_schedulers = scheduler_count >= 2
     has_diff = bool(section and "待機時間の差" in section and "wait:" in section)
     return [
