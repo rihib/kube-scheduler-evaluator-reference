@@ -318,3 +318,9 @@ def check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int)
             detail="ok" if final_ok else f"pod(s) with an unexpected final status: {bad}",
         ),
     ]
+
+
+def check_sanity_ranges(metrics: aggregate.Metrics) -> list[CheckResult]:
+    """units/U05.md's "値の範囲": wait times and unplaceable_free are >= 0,
+    allocation_rate is within [0, 1], and no metric is NaN."""
+    return []

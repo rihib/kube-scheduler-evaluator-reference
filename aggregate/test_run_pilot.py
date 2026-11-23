@@ -435,5 +435,55 @@ def test_check_sanity_counts_fails_when_a_pod_is_still_running_at_the_end() -> N
     assert final_check.passed is False
 
 
+# --- check_sanity_ranges ---
+
+
+def _metrics(**overrides) -> aggregate.Metrics:
+    fields = dict(
+        pending_wait_by_class={"0": [1.0, 2.0]},
+        pending_count_at_end=0,
+        allocation_rate={"cpu": 0.5},
+        unplaceable_free={"cpu": 10.0},
+        cluster_std=0.2,
+        nonzero_wait_fraction=0.5,
+    )
+    fields.update(overrides)
+    return aggregate.Metrics(**fields)
+
+
+def test_check_sanity_ranges_passes_for_well_formed_metrics() -> None:
+    results = run_pilot.check_sanity_ranges(_metrics())
+
+    assert all(r.passed for r in results)
+
+
+def test_check_sanity_ranges_fails_for_a_negative_wait_time() -> None:
+    results = run_pilot.check_sanity_ranges(_metrics(pending_wait_by_class={"0": [-1.0]}))
+
+    wait_check = next(r for r in results if "wait" in r.name)
+    assert wait_check.passed is False
+
+
+def test_check_sanity_ranges_fails_for_an_allocation_rate_outside_0_1() -> None:
+    results = run_pilot.check_sanity_ranges(_metrics(allocation_rate={"cpu": 1.5}))
+
+    alloc_check = next(r for r in results if "allocation" in r.name)
+    assert alloc_check.passed is False
+
+
+def test_check_sanity_ranges_fails_for_a_negative_unplaceable_free() -> None:
+    results = run_pilot.check_sanity_ranges(_metrics(unplaceable_free={"cpu": -1.0}))
+
+    free_check = next(r for r in results if "unplaceable" in r.name)
+    assert free_check.passed is False
+
+
+def test_check_sanity_ranges_fails_for_a_nan_value() -> None:
+    results = run_pilot.check_sanity_ranges(_metrics(cluster_std=float("nan")))
+
+    nan_check = next(r for r in results if "nan" in r.name.lower() or "NaN" in r.name)
+    assert nan_check.passed is False
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
