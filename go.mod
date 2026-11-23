@@ -115,10 +115,11 @@ require (
 )
 
 replace (
-	github.com/pfnet/kube-scheduler-evaluator => ../kube-scheduler-evaluator
 	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.32.7
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.32.7
 	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.32.7
 	k8s.io/dynamic-resource-allocation => k8s.io/dynamic-resource-allocation v0.32.7
 	k8s.io/kube-scheduler => k8s.io/kube-scheduler v0.32.7
 )
+
+replace github.com/pfnet/kube-scheduler-evaluator => github.com/rihib/kube-scheduler-evaluator v0.0.0-20261121185917-c63a4ee37ec1
