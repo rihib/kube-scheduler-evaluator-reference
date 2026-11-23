@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -81,7 +82,28 @@ func scenarioID(rho float64, p pilotProfile) string {
 // binary, which does not carry a vcs.revision even though nothing is wrong
 // with the build info.
 //
-// TODO(U03): not yet implemented.
 func referenceCommitFrom(info *debug.BuildInfo) (commit string, found bool) {
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" {
+			return s.Value, true
+		}
+	}
 	return "", false
+}
+
+// referenceCommit returns reference's own commit, the same way
+// record.EvaluatorCommit does for the evaluator module: build info's
+// vcs.revision when available (the normal "go build" case), falling back to
+// asking git directly for a "go test" binary, which does not carry one.
+func referenceCommit() (string, error) {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if commit, found := referenceCommitFrom(info); found {
+			return commit, nil
+		}
+	}
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("build info has no usable vcs.revision, and git rev-parse HEAD failed: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
