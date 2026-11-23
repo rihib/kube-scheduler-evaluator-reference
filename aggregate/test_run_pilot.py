@@ -356,5 +356,30 @@ def test_check_scenario5_fails_when_fewer_than_two_schedulers_are_listed() -> No
     assert any(not r.passed for r in results)
 
 
+# --- check_scenario6 ---
+
+
+def test_check_scenario6_passes_when_the_prediction_section_has_both_metrics() -> None:
+    results = run_pilot.check_scenario6(GOOD_REPORT_TEXT)
+
+    assert all(r.passed for r in results)
+
+
+def test_check_scenario6_fails_when_rho_1_1_has_no_prediction_section() -> None:
+    text = GOOD_REPORT_TEXT.split("### 予測と結果（高負荷）")[0]
+
+    results = run_pilot.check_scenario6(text)
+
+    assert any(not r.passed for r in results)
+
+
+def test_check_scenario6_fails_when_the_unplaceable_free_row_is_missing() -> None:
+    text = GOOD_REPORT_TEXT.replace("| unplaceable_free:cpu | 0.4000 | 当たった |\n", "")
+
+    results = run_pilot.check_scenario6(text)
+
+    assert any(not r.passed for r in results)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

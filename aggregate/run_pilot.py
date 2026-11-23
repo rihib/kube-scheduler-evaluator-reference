@@ -263,3 +263,10 @@ def check_scenario5(report_text: str) -> list[CheckResult]:
             detail="ok" if has_diff else "no 待機時間の差 with a wait: entry found",
         ),
     ]
+
+
+def check_scenario6(report_text: str) -> list[CheckResult]:
+    """spec.md scenario 6's Then: the ρ = 1.1 section shows the prediction/result
+    pairing for large-request pods' wait time and the unplaceable free amount
+    (units/U05.md's "確かめ方")."""
+    return []
