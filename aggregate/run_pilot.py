@@ -536,4 +536,4 @@ def format_results(results: Sequence[CheckResult]) -> str:
     """Renders every check's outcome as one line, so a failure's reason is
     visible without re-reading this module (units/U05.md: "項目ごとに通ったか
     落ちたかを、落ちた理由とともに表示する")."""
-    return ""
+    return "\n".join(f"[{'PASS' if r.passed else 'FAIL'}] {r.name}: {r.detail}" for r in results)
