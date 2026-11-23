@@ -485,5 +485,35 @@ def test_check_sanity_ranges_fails_for_a_nan_value() -> None:
     assert nan_check.passed is False
 
 
+# --- check_sanity_rho_effect ---
+
+
+def test_check_sanity_rho_effect_passes_when_allocation_rate_is_higher_at_high_rho() -> None:
+    low = _metrics(allocation_rate={"cpu": 0.3, "memory": 0.2})
+    high = _metrics(allocation_rate={"cpu": 0.6, "memory": 0.5})
+
+    results = run_pilot.check_sanity_rho_effect(low, high)
+
+    assert all(r.passed for r in results)
+
+
+def test_check_sanity_rho_effect_fails_when_a_resource_does_not_increase() -> None:
+    low = _metrics(allocation_rate={"cpu": 0.6})
+    high = _metrics(allocation_rate={"cpu": 0.3})
+
+    results = run_pilot.check_sanity_rho_effect(low, high)
+
+    assert any(not r.passed for r in results)
+
+
+def test_check_sanity_rho_effect_fails_when_no_resource_is_common() -> None:
+    low = _metrics(allocation_rate={"cpu": 0.3})
+    high = _metrics(allocation_rate={"gpu": 0.5})
+
+    results = run_pilot.check_sanity_rho_effect(low, high)
+
+    assert any(not r.passed for r in results)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

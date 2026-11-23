@@ -355,3 +355,10 @@ def check_sanity_ranges(metrics: aggregate.Metrics) -> list[CheckResult]:
             detail="ok" if nan_ok else f"found {len(nan_values)} NaN value(s)",
         ),
     ]
+
+
+def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho: aggregate.Metrics) -> list[CheckResult]:
+    """units/U05.md's "負荷の効き方": for every resource both runs measured,
+    the higher rho's allocation_rate is higher than the lower rho's (same
+    scheduler profile, since the caller compares matching schedulers)."""
+    return []
