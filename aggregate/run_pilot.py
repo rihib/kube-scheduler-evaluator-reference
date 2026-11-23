@@ -537,3 +537,147 @@ def format_results(results: Sequence[CheckResult]) -> str:
     visible without re-reading this module (units/U05.md: "項目ごとに通ったか
     落ちたかを、落ちた理由とともに表示する")."""
     return "\n".join(f"[{'PASS' if r.passed else 'FAIL'}] {r.name}: {r.detail}" for r in results)
+
+
+def _parse_args(argv: list[str]):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run experiment 1's pilot end to end and machine-check its Scenarios (units/U05.md).")
+    parser.add_argument("--nodes", default=".cache/clusterdata/openb_node_list_all_node.csv", help="openb node list CSV")
+    parser.add_argument("--pods", default=".cache/clusterdata/openb_pod_list_default.csv", help="openb pod list CSV")
+    parser.add_argument("--seed", type=int, default=1, help="seed for sampling and ordering pods (cmd/buildinput, cmd/runpilot)")
+    parser.add_argument("--ratio", type=float, default=0.8, help="fraction of non-Pending pods to keep")
+    parser.add_argument("--out", default="pilot-run", help="directory the records/ and report/ subdirectories are written under")
+    return parser.parse_args(argv)
+
+
+def _run_subprocess(args: list[str]):
+    import subprocess
+
+    return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+_PILOT_RHOS = (aggregate.RHO_NEGATIVE_CONTROL, aggregate.RHO_HIGH_LOAD)
+_MISSING_BUILDINPUT_SUMMARY = BuildInputSummary(
+    used_pods=-1, excluded_pods=-1, failed_pods=-1, rho_before=float("nan"), rho_after=float("nan")
+)
+
+
+def run(argv: list[str], *, run_subprocess=None) -> int:
+    """The pilot command (units/U05.md): builds one openb input version per
+    rho (cmd/buildinput, run once per rho so scenario 1's own numbers are
+    for rho=1.1 while the sanity checks also see rho=0.5's), runs all four
+    (rho, scheduler) combinations (cmd/runpilot), aggregates them into a
+    report (aggregate.run, in-process since both are this same Python
+    module), and machine-checks every Scenario 1-6 Then plus the numeric
+    sanity checks (run_all_checks). Must be run from the repository root, so
+    "go run ./cmd/..." resolves.
+
+    run_subprocess is injected so a test can observe or fake the "go run"
+    calls without actually invoking Go; the default runs them for real.
+    """
+    run_subprocess = run_subprocess or _run_subprocess
+    args = _parse_args(argv)
+    out_dir = Path(args.out)
+    records_dir = out_dir / "records"
+    report_dir = out_dir / "report"
+
+    try:
+        pods_text = Path(args.pods).read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"run_pilot: failed to read {args.pods}: {e}", file=sys.stderr)
+        return 1
+    eligible_pods = count_eligible_pods(pods_text)
+
+    summaries: dict[float, BuildInputSummary] = {}
+    for rho in _PILOT_RHOS:
+        proc = run_subprocess(
+            [
+                "go",
+                "run",
+                "./cmd/buildinput",
+                "--nodes",
+                args.nodes,
+                "--pods",
+                args.pods,
+                "--seed",
+                str(args.seed),
+                "--rho",
+                str(rho),
+                "--ratio",
+                str(args.ratio),
+            ]
+        )
+        if proc.returncode != 0:
+            print(f"run_pilot: buildinput failed for rho={rho}:\n{proc.stderr}", file=sys.stderr)
+            summaries[rho] = _MISSING_BUILDINPUT_SUMMARY
+            continue
+        try:
+            summaries[rho] = parse_buildinput_summary(proc.stdout)
+        except ValueError as e:
+            print(f"run_pilot: could not parse buildinput's output for rho={rho}: {e}", file=sys.stderr)
+            summaries[rho] = _MISSING_BUILDINPUT_SUMMARY
+
+    runpilot_proc = run_subprocess(
+        [
+            "go",
+            "run",
+            "./cmd/runpilot",
+            "--nodes",
+            args.nodes,
+            "--pods",
+            args.pods,
+            "--seed",
+            str(args.seed),
+            "--ratio",
+            str(args.ratio),
+            "--rhos",
+            ",".join(str(r) for r in _PILOT_RHOS),
+            "--iterations",
+            "1",
+            "--out",
+            str(records_dir),
+        ]
+    )
+    if runpilot_proc.returncode != 0:
+        print(f"run_pilot: runpilot failed:\n{runpilot_proc.stderr}", file=sys.stderr)
+
+    try:
+        texts = aggregate.read_record_texts_from_folder(records_dir)
+        parsed = [aggregate.parse_record(text) for _, text in texts]
+        records = [r for r in parsed if not r.truncated and r.transitions]
+    except (OSError, ValueError, KeyError) as e:
+        print(f"run_pilot: failed to read records from {records_dir}: {e}", file=sys.stderr)
+        records = []
+
+    agg_exit = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(report_dir)])
+    if agg_exit != 0:
+        print(f"run_pilot: aggregate report command failed (exit code {agg_exit})", file=sys.stderr)
+
+    report_path = report_dir / "report.md"
+    report_text = report_path.read_text(encoding="utf-8") if report_path.exists() else ""
+    figures_dir = report_dir / "figures"
+    existing_figures = {f"figures/{p.name}" for p in figures_dir.glob("*.png")} if figures_dir.exists() else set()
+
+    results = run_all_checks(
+        buildinput_summary_low_rho=summaries[aggregate.RHO_NEGATIVE_CONTROL],
+        buildinput_summary_high_rho=summaries[aggregate.RHO_HIGH_LOAD],
+        eligible_pods=eligible_pods,
+        ratio=args.ratio,
+        records=records,
+        report_text=report_text,
+        existing_figures=existing_figures,
+    )
+
+    print(format_results(results))
+    failed = [r for r in results if not r.passed]
+    print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")
+    return 1 if failed else 0
+
+
+def main() -> None:
+    sys.exit(run(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    main()
