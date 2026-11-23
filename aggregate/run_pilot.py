@@ -362,21 +362,31 @@ def check_sanity_ranges(metrics: aggregate.Metrics) -> list[CheckResult]:
 
 
 def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho: aggregate.Metrics) -> list[CheckResult]:
-    """units/U05.md's "負荷の効き方": for every resource both runs measured,
-    the higher rho's allocation_rate is higher than the lower rho's (same
-    scheduler profile, since the caller compares matching schedulers)."""
+    """units/U05.md's "負荷の効き方": for every resource both runs measured and
+    at least one of them actually allocated against, the higher rho's
+    allocation_rate is higher than the lower rho's (same scheduler profile,
+    since the caller compares matching schedulers).
+
+    A resource both runs measured as exactly 0.0 is excluded from that
+    comparison: every node's capacity carries a "pods" entry
+    (scenarios/clusterdata/gpu2023.go's buildNode sets corev1.ResourcePods),
+    but nothing ever allocates against it (only cpu/memory/gpu get
+    allocated_resource transitions), so its allocation_rate is always 0.0
+    regardless of rho — found running against real openb data
+    (units/U05.md's "先に抜き出す割合を小さくした入力で1回通す" step)."""
     common = sorted(set(metrics_low_rho.allocation_rate) & set(metrics_high_rho.allocation_rate))
-    if not common:
+    exercised = [r for r in common if metrics_low_rho.allocation_rate[r] > 0 or metrics_high_rho.allocation_rate[r] > 0]
+    if not exercised:
         return [
             CheckResult(
                 name="sanity: rho effect on allocation_rate",
                 passed=False,
-                detail="no resource is measured by both the rho=0.5 and rho=1.1 runs",
+                detail="no resource both runs measured was ever actually allocated against",
             )
         ]
     not_increased = {
         r: (metrics_low_rho.allocation_rate[r], metrics_high_rho.allocation_rate[r])
-        for r in common
+        for r in exercised
         if not metrics_high_rho.allocation_rate[r] > metrics_low_rho.allocation_rate[r]
     }
     ok = not not_increased
