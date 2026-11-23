@@ -275,7 +275,11 @@ func referenceCommitFrom(info *debug.BuildInfo) (commit string, found bool) {
 // information), so this is the path that usually decides whether the
 // record's header names a dirty tree.
 func referenceCommitFromGit(revParseOut, statusOut string) string {
-	return ""
+	commit := strings.TrimSpace(revParseOut)
+	if strings.TrimSpace(statusOut) != "" {
+		commit += "-dirty"
+	}
+	return commit
 }
 
 // referenceCommit returns reference's own commit, the same way
@@ -292,5 +296,13 @@ func referenceCommit() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("build info has no usable vcs.revision, and git rev-parse HEAD failed: %w", err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	// Asked separately because "git rev-parse HEAD" says nothing about
+	// uncommitted changes; failing here instead of assuming a clean tree,
+	// since a record naming a commit without "-dirty" is a claim about which
+	// tree actually ran.
+	status, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD succeeded, but git status --porcelain failed, so whether the tree is dirty is unknown: %w", err)
+	}
+	return referenceCommitFromGit(string(out), string(status)), nil
 }
