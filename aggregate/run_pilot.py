@@ -269,4 +269,24 @@ def check_scenario6(report_text: str) -> list[CheckResult]:
     """spec.md scenario 6's Then: the ρ = 1.1 section shows the prediction/result
     pairing for large-request pods' wait time and the unplaceable free amount
     (units/U05.md's "確かめ方")."""
-    return []
+    section = _rho_section(report_text, "1.1")
+    has_section = section is not None and "### 予測と結果（高負荷）" in section
+    has_wait_row = bool(section and re.search(r"\| wait:\S+ \|.*\| (当たった|当たらなかった) \|", section))
+    has_unplaceable_row = bool(section and re.search(r"\| unplaceable_free:\S+ \|.*\| (当たった|当たらなかった) \|", section))
+    return [
+        CheckResult(
+            name="scenario6: rho = 1.1 has a prediction-and-result section",
+            passed=has_section,
+            detail="ok" if has_section else "no ### 予測と結果（高負荷） section found under ## ρ = 1.1",
+        ),
+        CheckResult(
+            name="scenario6: a large-request wait-time prediction/result row is shown",
+            passed=has_wait_row,
+            detail="ok" if has_wait_row else "no wait: row with a 当たった/当たらなかった verdict found",
+        ),
+        CheckResult(
+            name="scenario6: an unplaceable-free prediction/result row is shown",
+            passed=has_unplaceable_row,
+            detail="ok" if has_unplaceable_row else "no unplaceable_free: row with a 当たった/当たらなかった verdict found",
+        ),
+    ]
