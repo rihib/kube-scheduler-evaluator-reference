@@ -6,6 +6,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -14,8 +17,20 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/clusterdata"
+	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/consts"
 	"github.com/pfnet/kube-scheduler-evaluator/cmd/evaluator"
+	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
+	"k8s.io/kubernetes/pkg/scheduler"
+	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config/latest"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
 )
+
+// traceName identifies the input trace in the transition record's header
+// (decisions.md: "入力の情報は、トレースの名前と版..."). This pilot only runs
+// against the openb trace.
+const traceName = "openb"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, nil, nil))
@@ -29,14 +44,141 @@ func main() {
 // Implementation Decisions: "コマンドのアダプターは、記録の書き出し先と、
 // reference のコミットを取るものを外から受け取る"); nil selects their real
 // implementations.
-//
-// TODO(U03): not yet implemented; always reports success without running anything.
 func run(
 	args []string, stdout, stderr io.Writer,
 	recordWriterFactory evaluator.RecordWriterFactory,
 	referenceCommitProvider func() (string, error),
 ) int {
-	return 0
+	fs := flag.NewFlagSet("runpilot", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	nodesPath := fs.String("nodes", ".cache/clusterdata/openb_node_list_all_node.csv", "openb node list CSV")
+	podsPath := fs.String("pods", ".cache/clusterdata/openb_pod_list_default.csv", "openb pod list CSV")
+	seed := fs.Int64("seed", 1, "seed for sampling and ordering pods")
+	sampleRatio := fs.Float64("ratio", 0.8, "fraction of non-Pending pods to keep")
+	rhosFlag := fs.String("rhos", "0.5,1.1", "comma-separated target rho values to run, one input version each")
+	iterations := fs.Int("iterations", 1, "number of times to repeat each rho x scheduler profile combination")
+	outDir := fs.String("out", "records", "directory each run's transition record is written to")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	rhos, err := parseRhos(*rhosFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		return 2
+	}
+
+	nodesCSV, err := os.ReadFile(*nodesPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		return 1
+	}
+	podsCSV, err := os.ReadFile(*podsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		return 1
+	}
+
+	commitProvider := referenceCommitProvider
+	if commitProvider == nil {
+		commitProvider = referenceCommit
+	}
+	refCommit, err := commitProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "runpilot: failed to get reference commit: %v\n", err)
+		return 1
+	}
+	traceVersion := strings.TrimSuffix(pathBase(*podsPath), ".csv")
+
+	scenarios, err := pilotScenarios(nodesCSV, podsCSV, *seed, *sampleRatio, rhos, *iterations, traceVersion, refCommit)
+	if err != nil {
+		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		return 1
+	}
+
+	cfgOpts := []evaluator.ConfigOption{}
+	if recordWriterFactory != nil {
+		cfgOpts = append(cfgOpts, evaluator.WithRecordWriterFactory(recordWriterFactory))
+	} else {
+		cfgOpts = append(cfgOpts, evaluator.WithRecordOutputDir(*outDir))
+	}
+
+	eval, err := evaluator.New(
+		evaluator.WithConfig(
+			consts.UserID, consts.KubeconfigPath, consts.EtcdPrefix, consts.EtcdURL,
+			false, // disable externalMode
+			consts.SlogLevel,
+			cfgOpts...,
+		),
+		evaluator.WithMetricStores(),
+		scenarios...,
+	)
+	if err != nil {
+		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		return 1
+	}
+
+	return eval.Run(context.Background())
+}
+
+// pilotScenarios builds one definition.Scenario per (rho, profile) pair: the
+// input version for rho is built once (units/U03.md: "U02 で作った入力の版を、
+// そのまま evaluator のシナリオとして使う") and its events are reused by both
+// profiles' scenarios, since a scenario's generator only reads the slice.
+func pilotScenarios(
+	nodesCSV, podsCSV []byte,
+	seed int64, sampleRatio float64, rhos []float64, iterations int,
+	traceVersion, referenceCommit string,
+) ([]definition.Scenario, error) {
+	var scenarios []definition.Scenario
+	for _, rho := range rhos {
+		events, _, err := clusterdata.BuildInputVersion(
+			bytes.NewReader(nodesCSV), bytes.NewReader(podsCSV), seed, rho, sampleRatio,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range pilotProfiles {
+			schedulerProfile, err := kubeSchedulerProfile(p)
+			if err != nil {
+				return nil, err
+			}
+			identity := definition.RunIdentity{
+				TraceName:        traceName,
+				TraceVersion:     traceVersion,
+				ReferenceCommit:  referenceCommit,
+				InputSeed:        strconv.FormatInt(seed, 10),
+				Rho:              rho,
+				SchedulerProfile: profileDescription(p),
+			}
+			scenarios = append(scenarios, evaluator.WithScenario(
+				scenarioID(rho, p), iterations, eventsGenerator(events), nil, identity,
+				scheduler.WithProfiles(schedulerProfile),
+			))
+		}
+	}
+	return scenarios, nil
+}
+
+// eventsGenerator adapts a precomputed event slice (clusterdata.BuildInputVersion's
+// result) to the generator function shape evaluator.WithScenario expects.
+func eventsGenerator(events []definition.Event) func(chan<- definition.Event) {
+	return func(ch chan<- definition.Event) {
+		for _, e := range events {
+			ch <- e
+		}
+	}
+}
+
+// pathBase returns the final path element, without relying on the OS path
+// separator conventions of filepath.Base (the CLI only ever receives forward
+// slash paths in practice, and this keeps the import list small).
+func pathBase(path string) string {
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		return path[i+1:]
+	}
+	return path
 }
 
 // parseRhos splits a comma-separated list of target rho values.
@@ -63,7 +205,63 @@ func parseRhos(s string) ([]float64, error) {
 // pilotProfile is one of the two scheduler profiles compared in experiment1's
 // pilot (units/U03.md Implementation Decisions: "2つの profile を作る").
 type pilotProfile struct {
-	name string
+	name     string
+	strategy schedulerconfig.ScoringStrategyType
+}
+
+// pilotProfiles are the two profiles every rho is run against. Both score
+// NodeResourcesFit by cpu, memory and nvidia.com/gpu with weight 1, and
+// disable NodeResourcesBalancedAllocation's score so NodeResourcesFit's
+// scoring strategy is the only thing that differs between them; every other
+// plugin (filtering included) is left at its default (units/U03.md).
+var pilotProfiles = []pilotProfile{
+	{name: "LeastAllocated", strategy: schedulerconfig.LeastAllocated},
+	{name: "MostAllocated", strategy: schedulerconfig.MostAllocated},
+}
+
+// kubeSchedulerProfile builds the scheduler profile config for one
+// pilotProfile, starting from the scheduler's own defaulted profile
+// (latest.Default(), the same defaulting a KubeSchedulerConfiguration file
+// goes through) so every plugin this pilot does not care about - including
+// the single-plugin extension points such as QueueSort - keeps its default
+// instead of being left empty. It only disables NodeResourcesBalancedAllocation's
+// score and replaces NodeResourcesFit's scoring strategy args (units/U03.md:
+// "ほかの採点は既定のまま残す").
+func kubeSchedulerProfile(p pilotProfile) (schedulerconfig.KubeSchedulerProfile, error) {
+	cfg, err := latest.Default()
+	if err != nil {
+		return schedulerconfig.KubeSchedulerProfile{}, fmt.Errorf("failed to build the default scheduler profile: %w", err)
+	}
+	profile := *cfg.Profiles[0].DeepCopy()
+	profile.Plugins.MultiPoint.Disabled = append(
+		profile.Plugins.MultiPoint.Disabled,
+		schedulerconfig.Plugin{Name: names.NodeResourcesBalancedAllocation},
+	)
+	for i, pc := range profile.PluginConfig {
+		if pc.Name != names.NodeResourcesFit {
+			continue
+		}
+		profile.PluginConfig[i].Args = &schedulerconfig.NodeResourcesFitArgs{
+			ScoringStrategy: &schedulerconfig.ScoringStrategy{
+				Type: p.strategy,
+				Resources: []schedulerconfig.ResourceSpec{
+					{Name: "cpu", Weight: 1},
+					{Name: "memory", Weight: 1},
+					{Name: "nvidia.com/gpu", Weight: 1},
+				},
+			},
+		}
+	}
+	return profile, nil
+}
+
+// profileDescription is the human-readable description of p written to the
+// transition record's header (definition.RunIdentity.SchedulerProfile).
+func profileDescription(p pilotProfile) string {
+	return fmt.Sprintf(
+		"NodeResourcesFit(scoringStrategy=%s, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled",
+		p.strategy,
+	)
 }
 
 // scenarioID builds a scenario ID unique to one (rho, profile) combination.
