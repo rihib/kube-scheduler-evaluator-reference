@@ -56,5 +56,31 @@ def test_parse_buildinput_summary_raises_when_a_field_is_missing() -> None:
         raise AssertionError("expected ValueError for a buildinput summary missing fields")
 
 
+POD_CSV_HEADER = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n"
+
+
+def test_count_eligible_pods_excludes_pending_rows() -> None:
+    # scenarios/clusterdata/input_version.go's BuildInputVersion treats
+    # "Pending" (case-insensitively) as the only excluded phase before sampling;
+    # units/U05.md's "使った件数が...Pendingを除いたPodの80%であること" needs
+    # that same eligible count independently of what buildinput itself reports.
+    csv_text = (
+        POD_CSV_HEADER
+        + "pod-1,100,100,0,0,,BestEffort,Running,0,10,0\n"
+        + "pod-2,100,100,0,0,,BestEffort,Pending,0,,\n"
+        + "pod-3,100,100,0,0,,BestEffort,Failed,0,10,0\n"
+        + "pod-4,100,100,0,0,,BestEffort,pending,0,,\n"
+    )
+
+    assert run_pilot.count_eligible_pods(csv_text) == 2
+
+
+def test_expected_sampled_count_rounds_half_up_like_go() -> None:
+    # scenarios/clusterdata/input_version.go's sampleAndOrderPods:
+    # int(float64(len(eligible))*sampleRatio + 0.5).
+    assert run_pilot.expected_sampled_count(eligible=5, ratio=0.5) == 3
+    assert run_pilot.expected_sampled_count(eligible=1000, ratio=0.8) == 800
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

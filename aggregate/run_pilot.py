@@ -86,3 +86,19 @@ def parse_buildinput_summary(text: str) -> BuildInputSummary:
         rho_before=float(values["rho (before)"]),
         rho_after=float(values["rho (after)"]),
     )
+
+
+def count_eligible_pods(pods_csv_text: str) -> int:
+    """Counts the pod CSV's rows BuildInputVersion samples from before applying
+    sampleRatio: every row except the header and "Pending" ones
+    (scenarios/clusterdata/input_version.go). Used to compute the expected
+    used-pod count independently of what buildinput itself reports
+    (units/U05.md scenario 1's "Pendingを除いたPodの80%")."""
+    return 0
+
+
+def expected_sampled_count(eligible: int, ratio: float) -> int:
+    """The used-pod count BuildInputVersion's sampleAndOrderPods computes:
+    int(eligible * ratio + 0.5), i.e. round-half-up truncated toward zero,
+    the same as Go's int() conversion."""
+    return 0
