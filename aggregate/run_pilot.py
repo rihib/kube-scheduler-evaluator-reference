@@ -455,8 +455,12 @@ def run_all_checks(
     results.append(check_sanity_rho_achieved(buildinput_summary_high_rho, target_rho=aggregate.RHO_HIGH_LOAD))
 
     def find(rho: float, scheduler: str) -> aggregate.RunRecord | None:
+        # scenarios/schedulerprofile.Pilot's description is not the bare
+        # "LeastAllocated"/"MostAllocated" (schedulerprofile.go: "NodeResourcesFit
+        # (scoringStrategy=LeastAllocated, ...); NodeResourcesBalancedAllocation
+        # disabled"), so this matches by containment, not equality.
         for r in records:
-            if math.isclose(r.header.rho, rho, abs_tol=_RHO_TOLERANCE) and r.header.scheduler_profile == scheduler:
+            if math.isclose(r.header.rho, rho, abs_tol=_RHO_TOLERANCE) and scheduler in r.header.scheduler_profile:
                 return r
         return None
 

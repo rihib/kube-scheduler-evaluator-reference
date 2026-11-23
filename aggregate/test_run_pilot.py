@@ -745,4 +745,4 @@ def test_run_builds_records_and_report_from_a_tiny_openb_style_csv(tmp_path: Pat
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__]))
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
