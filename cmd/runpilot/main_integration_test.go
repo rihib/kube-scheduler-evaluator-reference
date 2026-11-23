@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// pilotNodesCSV, pilotTestPodsFile and pilotTestPodsCSV are also defined,
+// pilotTestNodesCSV, pilotTestPodsFile and pilotTestPodsCSV are also defined,
 // identically, in main_test.go: that file has no build tag, so it is
 // compiled together with this one whenever -tags integration is passed, and
 // redeclaring them here would be a build error. The same goes for
