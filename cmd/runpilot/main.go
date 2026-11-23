@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -89,7 +90,7 @@ func run(
 		fmt.Fprintf(stderr, "runpilot: failed to get reference commit: %v\n", err)
 		return 1
 	}
-	traceVersion := strings.TrimSuffix(pathBase(*podsPath), ".csv")
+	traceVersion := strings.TrimSuffix(filepath.Base(*podsPath), ".csv")
 
 	scenarios, err := pilotScenarios(nodesCSV, podsCSV, *seed, *sampleRatio, rhos, *iterations, traceVersion, refCommit)
 	if err != nil {
@@ -97,7 +98,7 @@ func run(
 		return 1
 	}
 
-	cfgOpts := []evaluator.ConfigOption{}
+	var cfgOpts []evaluator.ConfigOption
 	if recordWriterFactory != nil {
 		cfgOpts = append(cfgOpts, evaluator.WithRecordWriterFactory(recordWriterFactory))
 	} else {
@@ -169,16 +170,6 @@ func eventsGenerator(events []definition.Event) func(chan<- definition.Event) {
 			ch <- e
 		}
 	}
-}
-
-// pathBase returns the final path element, without relying on the OS path
-// separator conventions of filepath.Base (the CLI only ever receives forward
-// slash paths in practice, and this keeps the import list small).
-func pathBase(path string) string {
-	if i := strings.LastIndexByte(path, '/'); i >= 0 {
-		return path[i+1:]
-	}
-	return path
 }
 
 // parseRhos splits a comma-separated list of target rho values.
