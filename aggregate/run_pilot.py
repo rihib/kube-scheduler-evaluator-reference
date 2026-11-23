@@ -297,4 +297,24 @@ def check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int)
     and at the end of observation every pod is either "completed" or
     "pending" (not stuck "running" or, since this pilot has no preemption,
     "deleted")."""
-    return []
+    created = {
+        t.component_id for t in record.transitions if t.operation == aggregate.OpCreateTask and t.state == aggregate.StateInstanceStatus
+    }
+    count_ok = len(created) == expected_pod_count
+
+    statuses = aggregate.final_instance_statuses(record.transitions)
+    bad = {instance_id: status for instance_id, status in statuses.items() if status not in ("completed", "pending")}
+    final_ok = not bad
+
+    return [
+        CheckResult(
+            name="sanity: created pod count matches the expected used-pod count",
+            passed=count_ok,
+            detail="ok" if count_ok else f"expected {expected_pod_count} created pods, found {len(created)}",
+        ),
+        CheckResult(
+            name="sanity: every pod's final status is completed or pending",
+            passed=final_ok,
+            detail="ok" if final_ok else f"pod(s) with an unexpected final status: {bad}",
+        ),
+    ]
