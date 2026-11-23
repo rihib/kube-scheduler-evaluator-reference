@@ -649,6 +649,35 @@ def test_run_all_checks_reports_scenario2_material_missing_when_the_rho_1_1_leas
     assert scenario2_missing.passed is False
 
 
+def test_run_all_checks_matches_records_whose_scheduler_profile_is_the_full_description() -> None:
+    # scenarios/schedulerprofile.Pilot's description is not the bare string
+    # "LeastAllocated"/"MostAllocated" cmd/runpilot's own records.go header
+    # carries (schedulerprofile_test.go, cmd/runpilot's integration run
+    # confirmed with the real pilot: "NodeResourcesFit(scoringStrategy=
+    # LeastAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1);
+    # NodeResourcesBalancedAllocation disabled"). run_all_checks must still
+    # find each (rho, scheduler) record by that real header value, not only
+    # by the bare name _good_combo_record's fixture happens to use.
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["records"] = [
+        aggregate.RunRecord(
+            header=_header(
+                rho=r.header.rho,
+                scheduler_profile=(
+                    f"NodeResourcesFit(scoringStrategy={r.header.scheduler_profile}, resources=cpu:1,memory:1,nvidia.com/gpu:1); "
+                    "NodeResourcesBalancedAllocation disabled"
+                ),
+            ),
+            transitions=r.transitions,
+        )
+        for r in kwargs["records"]
+    ]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    assert all("material missing" not in r.detail for r in results)
+
+
 # --- format_results ---
 
 
