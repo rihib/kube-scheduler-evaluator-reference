@@ -381,5 +381,59 @@ def test_check_scenario6_fails_when_the_unplaceable_free_row_is_missing() -> Non
     assert any(not r.passed for r in results)
 
 
+# --- check_sanity_counts ---
+
+
+def _create(time_sec: int, seq: int, task_id: str, instance_id: str) -> aggregate.Transition:
+    return _transition(
+        f"2024-01-01T00:00:{time_sec:02d}.000000000Z", seq, "create_task", instance_id, state="instance_status", task_id=task_id, after="pending"
+    )
+
+
+def _complete(time_sec: int, seq: int, task_id: str, instance_id: str) -> aggregate.Transition:
+    return _transition(
+        f"2024-01-01T00:00:{time_sec:02d}.000000000Z", seq, "complete", instance_id, state="instance_status", task_id=task_id, after="completed"
+    )
+
+
+def test_check_sanity_counts_passes_when_every_pod_ends_pending_or_completed() -> None:
+    record = aggregate.RunRecord(
+        header=_header(),
+        transitions=[
+            _create(0, 1, "task-1", "instance-1"),
+            _complete(10, 2, "task-1", "instance-1"),
+            _create(0, 3, "task-2", "instance-2"),  # stays pending
+        ],
+    )
+
+    results = run_pilot.check_sanity_counts(record, expected_pod_count=2)
+
+    assert all(r.passed for r in results)
+
+
+def test_check_sanity_counts_fails_when_created_count_does_not_match() -> None:
+    record = aggregate.RunRecord(header=_header(), transitions=[_create(0, 1, "task-1", "instance-1")])
+
+    results = run_pilot.check_sanity_counts(record, expected_pod_count=2)
+
+    count_check = next(r for r in results if "created" in r.name)
+    assert count_check.passed is False
+
+
+def test_check_sanity_counts_fails_when_a_pod_is_still_running_at_the_end() -> None:
+    record = aggregate.RunRecord(
+        header=_header(),
+        transitions=[
+            _create(0, 1, "task-1", "instance-1"),
+            _transition("2024-01-01T00:00:05.000000000Z", 2, "start", "instance-1", state="instance_status", task_id="task-1", after="running"),
+        ],
+    )
+
+    results = run_pilot.check_sanity_counts(record, expected_pod_count=1)
+
+    final_check = next(r for r in results if "final" in r.name)
+    assert final_check.passed is False
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

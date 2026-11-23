@@ -290,3 +290,11 @@ def check_scenario6(report_text: str) -> list[CheckResult]:
             detail="ok" if has_unplaceable_row else "no unplaceable_free: row with a 当たった/当たらなかった verdict found",
         ),
     ]
+
+
+def check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int) -> list[CheckResult]:
+    """units/U05.md's "数が合う": every used pod has a create_task transition,
+    and at the end of observation every pod is either "completed" or
+    "pending" (not stuck "running" or, since this pilot has no preemption,
+    "deleted")."""
+    return []
