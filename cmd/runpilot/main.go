@@ -57,3 +57,16 @@ func parseRhos(s string) ([]float64, error) {
 	}
 	return rhos, nil
 }
+
+// pilotProfile is one of the two scheduler profiles compared in experiment1's
+// pilot (units/U03.md Implementation Decisions: "2つの profile を作る").
+type pilotProfile struct {
+	name string
+}
+
+// scenarioID builds a scenario ID unique to one (rho, profile) combination.
+//
+// TODO(U03): not yet implemented.
+func scenarioID(rho float64, p pilotProfile) string {
+	return "unimplemented"
+}
