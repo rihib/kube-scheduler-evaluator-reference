@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -182,3 +183,13 @@ def check_scenario3(records: Sequence[aggregate.RunRecord]) -> list[CheckResult]
             detail="ok" if distinct_ok else f"combinations are not all distinct: {combos}",
         ),
     ]
+
+
+_FIGURE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+
+
+def check_scenario4(report_text: str, *, existing_figures: set[str]) -> list[CheckResult]:
+    """spec.md scenario 4's Then: the report carries the per-run metrics table
+    and a real scheduler diff for every rho section, and every figure the
+    report links to actually exists (units/U05.md's "確かめ方")."""
+    return []

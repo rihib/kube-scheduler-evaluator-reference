@@ -239,5 +239,77 @@ def test_check_scenario3_fails_when_two_records_share_the_same_combination() -> 
     assert distinct_check.passed is False
 
 
+# --- check_scenario4 ---
+
+GOOD_REPORT_TEXT = """# 実験1 集計報告
+
+## ρ = 0.5
+
+### 実行ごとのメトリクス
+
+| scheduler | iteration | pending_count_at_end | cluster_std | nonzero_wait_fraction | allocation_rate:cpu | unplaceable_free:cpu |
+| --- | --- | --- | --- | --- | --- | --- |
+| LeastAllocated | 0 | 0 | 0.5 | 0.1 | 0.3 | 0.0 |
+
+### 待機時間の分布
+
+![pending wait time distribution for ρ = 0.5](figures/rho-0.5-wait.png)
+
+### スケジューラの差
+
+LeastAllocated − MostAllocated
+
+| metric | diff |
+| --- | --- |
+| cluster_std | 0.1 |
+
+## ρ = 1.1
+
+### 実行ごとのメトリクス
+
+| scheduler | iteration | pending_count_at_end | cluster_std | nonzero_wait_fraction | allocation_rate:cpu | unplaceable_free:cpu |
+| --- | --- | --- | --- | --- | --- | --- |
+| LeastAllocated | 0 | 0 | 0.5 | 0.1 | 0.3 | 0.0 |
+
+### 待機時間の分布
+
+![pending wait time distribution for ρ = 1.1](figures/rho-1.1-wait.png)
+
+### スケジューラの差
+
+LeastAllocated − MostAllocated
+
+| metric | diff |
+| --- | --- |
+| cluster_std | 0.2 |
+"""
+
+
+def test_check_scenario4_passes_for_a_complete_report() -> None:
+    results = run_pilot.check_scenario4(GOOD_REPORT_TEXT, existing_figures={"figures/rho-0.5-wait.png", "figures/rho-1.1-wait.png"})
+
+    assert all(r.passed for r in results)
+
+
+def test_check_scenario4_fails_when_a_referenced_figure_is_missing() -> None:
+    results = run_pilot.check_scenario4(GOOD_REPORT_TEXT, existing_figures={"figures/rho-0.5-wait.png"})
+
+    figure_check = next(r for r in results if "figure" in r.name)
+    assert figure_check.passed is False
+    assert "rho-1.1-wait.png" in figure_check.detail
+
+
+def test_check_scenario4_fails_when_the_diff_section_only_has_the_fallback_message() -> None:
+    text = GOOD_REPORT_TEXT.replace(
+        "LeastAllocated − MostAllocated\n\n| metric | diff |\n| --- | --- |\n| cluster_std | 0.2 |",
+        "LeastAllocated と MostAllocated がどの入力の版でもそろわず、差を計算できなかった。",
+    )
+
+    results = run_pilot.check_scenario4(text, existing_figures={"figures/rho-0.5-wait.png", "figures/rho-1.1-wait.png"})
+
+    diff_check = next(r for r in results if "diff" in r.name)
+    assert diff_check.passed is False
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
