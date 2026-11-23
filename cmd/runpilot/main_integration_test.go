@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -111,5 +112,78 @@ func TestRun_FailsWhenPodsPathDoesNotExist(t *testing.T) {
 	entries, err := os.ReadDir(outDir)
 	if err == nil && len(entries) != 0 {
 		t.Errorf("record files = %v, want none", entries)
+	}
+}
+
+// initTempGitRepo creates a git repository with one commit in a temporary
+// directory, makes it the test's working directory, and returns that commit.
+// referenceCommit() asks git about the working directory it runs in, so the
+// contract tests below need a repository of their own: this repository's own
+// tree gets dirty while work is in progress, which would decide the answer
+// for them.
+func initTempGitRepo(t *testing.T) (dir, headCommit string) {
+	t.Helper()
+	dir = t.TempDir()
+	t.Chdir(dir)
+
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatalf("failed to write tracked.txt: %v", err)
+	}
+	// user.name/user.email and commit.gpgsign are passed per command so the
+	// commit does not depend on (or get blocked by) the developer's own git
+	// configuration.
+	for _, args := range [][]string{
+		{"-c", "init.defaultBranch=main", "init", "--quiet"},
+		{"add", "tracked.txt"},
+		{
+			"-c", "user.name=runpilot test", "-c", "user.email=test@example.com",
+			"-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "first",
+		},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v (output: %s)", args, err, out)
+		}
+	}
+
+	revParse := exec.Command("git", "rev-parse", "HEAD")
+	revParse.Dir = dir
+	out, err := revParse.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD failed: %v", err)
+	}
+	return dir, strings.TrimSpace(string(out))
+}
+
+// 本物の git に問い合わせる経路（ビルド情報に vcs.revision が無い、go run や
+// Makefile のビルドという普段の動かし方で通る経路）で、作業ツリーがコミットと
+// 同じなら、記録の1行目のコミットは HEAD をそのまま名乗る。
+func TestReferenceCommit_UsesGitHeadWhenTreeIsClean(t *testing.T) {
+	_, head := initTempGitRepo(t)
+
+	commit, err := referenceCommit()
+	if err != nil {
+		t.Fatalf("referenceCommit() failed: %v", err)
+	}
+	if commit != head {
+		t.Errorf("commit = %q, want %q (git rev-parse HEAD of the clean repository)", commit, head)
+	}
+}
+
+// 同じ経路で、作業ツリーが汚れていれば "-dirty" が付く。記録が、実際に動いた
+// ツリーと違うコミットを名乗らないため。
+func TestReferenceCommit_MarksDirtyWhenGitTreeIsDirty(t *testing.T) {
+	dir, head := initTempGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatalf("failed to dirty tracked.txt: %v", err)
+	}
+
+	commit, err := referenceCommit()
+	if err != nil {
+		t.Fatalf("referenceCommit() failed: %v", err)
+	}
+	if commit != head+"-dirty" {
+		t.Errorf("commit = %q, want %q", commit, head+"-dirty")
 	}
 }
