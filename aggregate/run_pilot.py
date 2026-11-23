@@ -577,6 +577,11 @@ def _run_subprocess(args: list[str]):
 
 
 _PILOT_RHOS = (aggregate.RHO_NEGATIVE_CONTROL, aggregate.RHO_HIGH_LOAD)
+# The exact scheduler_profile header value cmd/runpilot's LeastAllocated runs
+# carry (scenarios/schedulerprofile/schedulerprofile.go's description format).
+_LEAST_ALLOCATED_DESCRIPTION = (
+    "NodeResourcesFit(scoringStrategy=LeastAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled"
+)
 _MISSING_BUILDINPUT_SUMMARY = BuildInputSummary(
     used_pods=-1, excluded_pods=-1, failed_pods=-1, rho_before=float("nan"), rho_after=float("nan")
 )
@@ -669,7 +674,17 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
         print(f"run_pilot: failed to read records from {records_dir}: {e}", file=sys.stderr)
         records = []
 
-    agg_exit = aggregate.run(["--records-dir", str(records_dir), "--output-dir", str(report_dir)])
+    # aggregate.run's --distributed-scheduler must match a record's
+    # scheduler_profile exactly (aggregate.py's build_rho_sections compares
+    # it to section.scheduler_order by equality, not containment); its own
+    # default is the bare "LeastAllocated", but cmd/runpilot's header carries
+    # schedulerprofile.Pilot's full description. Without this, scenario 6's
+    # ρ = 1.1 prediction section always reports the distributed scheduler as
+    # "not found" — found running against real openb data (units/U05.md's
+    # "先に抜き出す割合を小さくした入力で1回通す" step).
+    agg_exit = aggregate.run(
+        ["--records-dir", str(records_dir), "--output-dir", str(report_dir), "--distributed-scheduler", _LEAST_ALLOCATED_DESCRIPTION]
+    )
     if agg_exit != 0:
         print(f"run_pilot: aggregate report command failed (exit code {agg_exit})", file=sys.stderr)
 
