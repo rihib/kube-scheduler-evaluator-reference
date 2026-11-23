@@ -65,8 +65,12 @@ type pilotProfile struct {
 }
 
 // scenarioID builds a scenario ID unique to one (rho, profile) combination.
-//
-// TODO(U03): not yet implemented.
+// definition.NewScenario requires an ID matching ^[a-zA-Z][a-zA-Z0-9-]*$, so
+// rho's decimal point is replaced with "p" (and a leading minus, which rho
+// never has in practice, with "neg" so the id still starts with a letter).
 func scenarioID(rho float64, p pilotProfile) string {
-	return "unimplemented"
+	rhoLabel := strconv.FormatFloat(rho, 'f', -1, 64)
+	rhoLabel = strings.ReplaceAll(rhoLabel, "-", "neg")
+	rhoLabel = strings.ReplaceAll(rhoLabel, ".", "p")
+	return fmt.Sprintf("rho%s-%s", rhoLabel, strings.ToLower(p.name))
 }
