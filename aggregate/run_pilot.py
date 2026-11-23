@@ -130,3 +130,11 @@ def check_scenario1(summary: BuildInputSummary, *, eligible_pods: int, ratio: fl
             detail="ok" if rho_ok else f"expected rho (after) == {target_rho}, got {summary.rho_after}",
         ),
     ]
+
+
+def check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
+    """spec.md scenario 2's Then: the header names the input version's seed,
+    rho, scheduler, both commits, and the hardware; the initial node capacity
+    is recorded; and assign/complete transitions carry a non-decreasing
+    virtual time (units/U05.md's "確かめ方")."""
+    return []

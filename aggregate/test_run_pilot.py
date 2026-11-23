@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
+import aggregate
 import run_pilot
 
 BUILDINPUT_SUMMARY_TEXT = (
@@ -111,6 +112,88 @@ def test_check_scenario1_fails_when_rho_does_not_match_target() -> None:
 
     rho_check = next(r for r in results if r.name == "scenario1: achieved rho matches the target")
     assert rho_check.passed is False
+
+
+# --- check_scenario2 ---
+
+
+def _transition(time: str, seq: int, operation: str, component_id: str, state: str = "", **kw) -> aggregate.Transition:
+    return aggregate.Transition(
+        time=time,
+        seq=seq,
+        operation=operation,
+        component_id=component_id,
+        task_id=kw.get("task_id"),
+        state=state,
+        state_key=kw.get("state_key"),
+        before=kw.get("before"),
+        after=kw.get("after"),
+        task_immutable=kw.get("task_immutable"),
+    )
+
+
+def _header(**overrides) -> aggregate.RunHeader:
+    fields = dict(
+        evaluation_id="eval-1",
+        scenario_id="rho1p1-leastallocated",
+        iteration=0,
+        trace_name="openb",
+        trace_version="openb_pod_list_default",
+        reference_commit="abc123",
+        input_seed="1",
+        rho=1.1,
+        evaluator_commit="def456",
+        hardware="test-machine",
+        scheduler_profile="LeastAllocated",
+    )
+    fields.update(overrides)
+    return aggregate.RunHeader(**fields)
+
+
+def _good_scenario2_transitions() -> list[aggregate.Transition]:
+    return [
+        _transition("2024-01-01T00:00:00.000000000Z", 1, "register_node", "node-1", state="resource_capacity", after={"cpu": "10"}),
+        _transition("2024-01-01T00:00:05.000000000Z", 2, "assign_node", "instance-1", state="assigned_node", after="node-1"),
+        _transition("2024-01-01T00:00:10.000000000Z", 3, "complete", "instance-1", state="instance_status", after="completed"),
+    ]
+
+
+def test_check_scenario2_passes_for_a_well_formed_record() -> None:
+    record = aggregate.RunRecord(header=_header(), transitions=_good_scenario2_transitions())
+
+    results = run_pilot.check_scenario2(record)
+
+    assert all(r.passed for r in results)
+
+
+def test_check_scenario2_fails_when_header_is_missing_a_field() -> None:
+    record = aggregate.RunRecord(header=_header(reference_commit=""), transitions=_good_scenario2_transitions())
+
+    results = run_pilot.check_scenario2(record)
+
+    header_check = next(r for r in results if "header" in r.name)
+    assert header_check.passed is False
+
+
+def test_check_scenario2_fails_when_no_initial_node_capacity_is_recorded() -> None:
+    record = aggregate.RunRecord(header=_header(), transitions=_good_scenario2_transitions()[1:])
+
+    results = run_pilot.check_scenario2(record)
+
+    capacity_check = next(r for r in results if "capacity" in r.name)
+    assert capacity_check.passed is False
+
+
+def test_check_scenario2_fails_when_virtual_time_goes_backwards() -> None:
+    transitions = _good_scenario2_transitions()
+    out_of_order = [transitions[0], transitions[2], transitions[1]]  # complete before assign, by position
+
+    record = aggregate.RunRecord(header=_header(), transitions=out_of_order)
+
+    results = run_pilot.check_scenario2(record)
+
+    time_check = next(r for r in results if "time" in r.name)
+    assert time_check.passed is False
 
 
 if __name__ == "__main__":
