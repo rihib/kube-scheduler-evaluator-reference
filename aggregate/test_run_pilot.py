@@ -196,5 +196,48 @@ def test_check_scenario2_fails_when_virtual_time_goes_backwards() -> None:
     assert time_check.passed is False
 
 
+# --- check_scenario3 ---
+
+
+def _record_with(rho: float, scheduler_profile: str) -> aggregate.RunRecord:
+    return aggregate.RunRecord(header=_header(rho=rho, scheduler_profile=scheduler_profile), transitions=[])
+
+
+def test_check_scenario3_passes_for_four_distinct_combinations() -> None:
+    records = [
+        _record_with(0.5, "LeastAllocated"),
+        _record_with(0.5, "MostAllocated"),
+        _record_with(1.1, "LeastAllocated"),
+        _record_with(1.1, "MostAllocated"),
+    ]
+
+    results = run_pilot.check_scenario3(records)
+
+    assert all(r.passed for r in results)
+
+
+def test_check_scenario3_fails_when_there_are_not_four_records() -> None:
+    records = [_record_with(0.5, "LeastAllocated"), _record_with(1.1, "LeastAllocated")]
+
+    results = run_pilot.check_scenario3(records)
+
+    count_check = next(r for r in results if "four" in r.name)
+    assert count_check.passed is False
+
+
+def test_check_scenario3_fails_when_two_records_share_the_same_combination() -> None:
+    records = [
+        _record_with(0.5, "LeastAllocated"),
+        _record_with(0.5, "LeastAllocated"),
+        _record_with(1.1, "LeastAllocated"),
+        _record_with(1.1, "MostAllocated"),
+    ]
+
+    results = run_pilot.check_scenario3(records)
+
+    distinct_check = next(r for r in results if "distinct" in r.name)
+    assert distinct_check.passed is False
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

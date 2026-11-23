@@ -24,6 +24,7 @@ from __future__ import annotations
 import csv
 import io
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -161,3 +162,9 @@ def check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
             detail="ok" if monotonic else "transition times are not in non-decreasing order",
         ),
     ]
+
+
+def check_scenario3(records: Sequence[aggregate.RunRecord]) -> list[CheckResult]:
+    """spec.md scenario 3's Then: exactly four records exist, one per distinct
+    (rho, scheduler profile) combination (units/U05.md's "確かめ方")."""
+    return []
