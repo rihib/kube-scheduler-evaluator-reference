@@ -263,6 +263,17 @@ LeastAllocated − MostAllocated
 | --- | --- |
 | cluster_std | 0.1 |
 
+### 陰性対照
+
+待機時間が0でないPodの割合:
+
+- LeastAllocated: 0.1000
+- MostAllocated: 0.1200
+
+待機時間の差:
+
+- wait:0: 0.3000
+
 ## ρ = 1.1
 
 ### 実行ごとのメトリクス
@@ -282,6 +293,15 @@ LeastAllocated − MostAllocated
 | metric | diff |
 | --- | --- |
 | cluster_std | 0.2 |
+
+### 予測と結果（高負荷）
+
+予測（experiment.md 3.1）: LeastAllocated の方が、大きな要求を持つタスクの待機時間と、置けない空き資源の量が大きい。
+
+| metric | diff（LeastAllocated − 他） | 予測が当たったか |
+| --- | --- | --- |
+| unplaceable_free:cpu | 0.4000 | 当たった |
+| wait:8 | 0.5000 | 当たった |
 """
 
 
@@ -309,6 +329,31 @@ def test_check_scenario4_fails_when_the_diff_section_only_has_the_fallback_messa
 
     diff_check = next(r for r in results if "diff" in r.name)
     assert diff_check.passed is False
+
+
+# --- check_scenario5 ---
+
+
+def test_check_scenario5_passes_when_the_negative_control_section_is_complete() -> None:
+    results = run_pilot.check_scenario5(GOOD_REPORT_TEXT)
+
+    assert all(r.passed for r in results)
+
+
+def test_check_scenario5_fails_when_rho_0_5_has_no_negative_control_section() -> None:
+    text = GOOD_REPORT_TEXT.split("### 陰性対照")[0] + "## ρ = 1.1\n"
+
+    results = run_pilot.check_scenario5(text)
+
+    assert any(not r.passed for r in results)
+
+
+def test_check_scenario5_fails_when_fewer_than_two_schedulers_are_listed() -> None:
+    text = GOOD_REPORT_TEXT.replace("- MostAllocated: 0.1200\n", "")
+
+    results = run_pilot.check_scenario5(text)
+
+    assert any(not r.passed for r in results)
 
 
 if __name__ == "__main__":

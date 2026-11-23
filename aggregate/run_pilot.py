@@ -225,3 +225,17 @@ def check_scenario4(report_text: str, *, existing_figures: set[str]) -> list[Che
             detail="ok" if figures_ok else f"missing figure file(s): {sorted(missing_figures)}",
         ),
     ]
+
+
+def _rho_section(report_text: str, rho_label: str) -> str | None:
+    """Returns the "## ρ = <rho_label>" section's own text (up to the next "##
+    ρ = " heading or end of report), or None if that rho has no section."""
+    match = re.search(rf"(?m)^## ρ = {re.escape(rho_label)}\n(.*?)(?=^## ρ = |\Z)", report_text, re.DOTALL)
+    return match.group(1) if match else None
+
+
+def check_scenario5(report_text: str) -> list[CheckResult]:
+    """spec.md scenario 5's Then: the ρ = 0.5 section shows the nonzero-wait
+    fraction for (at least) two schedulers, and the wait-time diff between
+    them (units/U05.md's "確かめ方")."""
+    return []
