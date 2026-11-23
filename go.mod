@@ -6,6 +6,7 @@ require (
 	github.com/pfnet/kube-scheduler-evaluator v0.0.0
 	k8s.io/api v0.32.7
 	k8s.io/apimachinery v0.32.7
+	k8s.io/client-go v0.32.7
 	k8s.io/kubernetes v1.32.7
 	k8s.io/utils v0.0.0-20241104100929-3ea5e8cea738
 )
@@ -96,7 +97,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apiextensions-apiserver v0.0.0 // indirect
 	k8s.io/apiserver v0.32.7 // indirect
-	k8s.io/client-go v0.32.7 // indirect
 	k8s.io/cloud-provider v0.0.0 // indirect
 	k8s.io/component-base v0.32.7 // indirect
 	k8s.io/component-helpers v0.32.7 // indirect
