@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-import aggregate  # noqa: F401  (used by later checks in this module)
+import aggregate
 
 
 @dataclass(frozen=True)
@@ -137,4 +137,27 @@ def check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
     rho, scheduler, both commits, and the hardware; the initial node capacity
     is recorded; and assign/complete transitions carry a non-decreasing
     virtual time (units/U05.md's "確かめ方")."""
-    return []
+    h = record.header
+    header_ok = bool(h.input_seed and h.scheduler_profile and h.evaluator_commit and h.reference_commit and h.hardware) and h.rho > 0
+    has_capacity = any(
+        t.operation == aggregate.OpRegisterNode and t.state == aggregate.StateResourceCapacity for t in record.transitions
+    )
+    times = [aggregate.parse_time(t.time) for t in record.transitions]
+    monotonic = all(times[i] <= times[i + 1] for i in range(len(times) - 1))
+    return [
+        CheckResult(
+            name="scenario2: header names seed, rho, scheduler, commits, and hardware",
+            passed=header_ok,
+            detail="ok" if header_ok else f"header incomplete: {h!r}",
+        ),
+        CheckResult(
+            name="scenario2: initial node capacity is recorded",
+            passed=has_capacity,
+            detail="ok" if has_capacity else "no register_node/resource_capacity transition found",
+        ),
+        CheckResult(
+            name="scenario2: transitions carry non-decreasing virtual time",
+            passed=monotonic,
+            detail="ok" if monotonic else "transition times are not in non-decreasing order",
+        ),
+    ]
