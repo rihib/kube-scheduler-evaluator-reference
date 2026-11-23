@@ -188,6 +188,22 @@ func TestReferenceCommit_MarksDirtyWhenGitTreeIsDirty(t *testing.T) {
 	}
 }
 
+// 同じ経路で、HEAD そのものを git に聞けなかったら失敗する。コミットを名乗れない
+// まま記録を書くと、どのツリーが動いたのか分からない記録ができるためである。
+func TestReferenceCommit_FailsWhenGitCannotTellTheHeadCommit(t *testing.T) {
+	// git init していない一時フォルダでは git rev-parse HEAD が
+	// "not a git repository" で失敗する。initTempGitRepo は呼ばない。
+	t.Chdir(t.TempDir())
+
+	commit, err := referenceCommit()
+	if err == nil {
+		t.Fatalf("referenceCommit() = %q, want an error", commit)
+	}
+	if !strings.Contains(err.Error(), "git rev-parse HEAD failed") {
+		t.Errorf("error = %q, want it to say that git rev-parse HEAD failed", err)
+	}
+}
+
 // 同じ経路で、HEAD は取れても作業ツリーが汚れているかを git に聞けなかったら、
 // クリーンな木と決めつけずに失敗する。"-dirty" の付かないコミットは、実際に
 // 動いたツリーがコミットと同じだという主張だからである。
