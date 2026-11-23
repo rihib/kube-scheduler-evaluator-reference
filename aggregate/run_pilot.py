@@ -142,9 +142,7 @@ def check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
     virtual time (units/U05.md's "確かめ方")."""
     h = record.header
     header_ok = bool(h.input_seed and h.scheduler_profile and h.evaluator_commit and h.reference_commit and h.hardware) and h.rho > 0
-    has_capacity = any(
-        t.operation == aggregate.OpRegisterNode and t.state == aggregate.StateResourceCapacity for t in record.transitions
-    )
+    has_capacity = any(t.operation == aggregate.OpRegisterNode and t.state == aggregate.StateResourceCapacity for t in record.transitions)
     times = [aggregate.parse_time(t.time) for t in record.transitions]
     monotonic = all(times[i] <= times[i + 1] for i in range(len(times) - 1))
     return [
@@ -329,7 +327,13 @@ def check_sanity_ranges(metrics: aggregate.Metrics) -> list[CheckResult]:
     allocation_ok = all(0.0 <= v <= 1.0 for v in metrics.allocation_rate.values())
     unplaceable_ok = all(v >= 0 for v in metrics.unplaceable_free.values())
 
-    scalar_values = [metrics.cluster_std, metrics.nonzero_wait_fraction, *metrics.allocation_rate.values(), *metrics.unplaceable_free.values(), *all_waits]
+    scalar_values = [
+        metrics.cluster_std,
+        metrics.nonzero_wait_fraction,
+        *metrics.allocation_rate.values(),
+        *metrics.unplaceable_free.values(),
+        *all_waits,
+    ]
     nan_values = [v for v in scalar_values if v is not None and math.isnan(v)]
     nan_ok = not nan_values
 
@@ -370,7 +374,11 @@ def check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rho
                 detail="no resource is measured by both the rho=0.5 and rho=1.1 runs",
             )
         ]
-    not_increased = {r: (metrics_low_rho.allocation_rate[r], metrics_high_rho.allocation_rate[r]) for r in common if not metrics_high_rho.allocation_rate[r] > metrics_low_rho.allocation_rate[r]}
+    not_increased = {
+        r: (metrics_low_rho.allocation_rate[r], metrics_high_rho.allocation_rate[r])
+        for r in common
+        if not metrics_high_rho.allocation_rate[r] > metrics_low_rho.allocation_rate[r]
+    }
     ok = not not_increased
     return [
         CheckResult(
@@ -385,7 +393,12 @@ def check_sanity_rho_achieved(summary: BuildInputSummary, *, target_rho: float) 
     """units/U05.md's "負荷の効き方": the achieved rho (buildinput's "rho
     (after)") matches the target rho that run was built for. Reusable for
     both rho=0.5 and rho=1.1 (scenario 1's own check only covers rho=1.1)."""
-    return CheckResult(name="placeholder", passed=False, detail="not implemented")
+    ok = abs(summary.rho_after - target_rho) <= _RHO_TOLERANCE
+    return CheckResult(
+        name=f"sanity: rho={target_rho} achieved matches the target",
+        passed=ok,
+        detail="ok" if ok else f"expected rho (after) == {target_rho}, got {summary.rho_after}",
+    )
 
 
 def check_sanity_scheduler_effect(metrics_least_allocated: aggregate.Metrics, metrics_most_allocated: aggregate.Metrics) -> list[CheckResult]:
@@ -436,4 +449,84 @@ def run_all_checks(
     instead of raising or being silently skipped (units/U05.md: "前の段が
     落ちて後の項目の材料ができないときは、後の項目を「材料が無い」として
     落とす")."""
-    return []
+    results: list[CheckResult] = []
+    results += check_scenario1(buildinput_summary_high_rho, eligible_pods=eligible_pods, ratio=ratio, target_rho=aggregate.RHO_HIGH_LOAD)
+    results.append(check_sanity_rho_achieved(buildinput_summary_low_rho, target_rho=aggregate.RHO_NEGATIVE_CONTROL))
+    results.append(check_sanity_rho_achieved(buildinput_summary_high_rho, target_rho=aggregate.RHO_HIGH_LOAD))
+
+    def find(rho: float, scheduler: str) -> aggregate.RunRecord | None:
+        for r in records:
+            if math.isclose(r.header.rho, rho, abs_tol=_RHO_TOLERANCE) and r.header.scheduler_profile == scheduler:
+                return r
+        return None
+
+    combos = [
+        (aggregate.RHO_NEGATIVE_CONTROL, "LeastAllocated"),
+        (aggregate.RHO_NEGATIVE_CONTROL, "MostAllocated"),
+        (aggregate.RHO_HIGH_LOAD, "LeastAllocated"),
+        (aggregate.RHO_HIGH_LOAD, "MostAllocated"),
+    ]
+    expected_pod_count = expected_sampled_count(eligible_pods, ratio)
+    metrics_by_combo: dict[tuple[float, str], aggregate.Metrics] = {}
+    for rho, scheduler in combos:
+        record = find(rho, scheduler)
+        if record is None:
+            results.append(
+                CheckResult(
+                    name=f"sanity: record for rho={rho}, {scheduler} exists",
+                    passed=False,
+                    detail=f"material missing: no record found for rho={rho}, {scheduler}",
+                )
+            )
+            continue
+        results += check_sanity_counts(record, expected_pod_count=expected_pod_count)
+        metrics = aggregate.compute_metrics(record.transitions)
+        metrics_by_combo[(rho, scheduler)] = metrics
+        results += check_sanity_ranges(metrics)
+
+    rec_high_least = find(aggregate.RHO_HIGH_LOAD, "LeastAllocated")
+    if rec_high_least is not None:
+        results += check_scenario2(rec_high_least)
+    else:
+        results.append(
+            CheckResult(
+                name="scenario2: record for rho=1.1, LeastAllocated exists",
+                passed=False,
+                detail="material missing: no record found for rho=1.1, LeastAllocated",
+            )
+        )
+
+    results += check_scenario3(list(records))
+    results += check_scenario4(report_text, existing_figures=existing_figures)
+    results += check_scenario5(report_text)
+    results += check_scenario6(report_text)
+
+    for scheduler in ("LeastAllocated", "MostAllocated"):
+        m_low = metrics_by_combo.get((aggregate.RHO_NEGATIVE_CONTROL, scheduler))
+        m_high = metrics_by_combo.get((aggregate.RHO_HIGH_LOAD, scheduler))
+        if m_low is not None and m_high is not None:
+            results += check_sanity_rho_effect(m_low, m_high)
+        else:
+            results.append(
+                CheckResult(
+                    name=f"sanity: rho effect on allocation_rate ({scheduler})",
+                    passed=False,
+                    detail=f"material missing: both rho=0.5 and rho=1.1 records for {scheduler} are needed",
+                )
+            )
+
+    for rho in (aggregate.RHO_NEGATIVE_CONTROL, aggregate.RHO_HIGH_LOAD):
+        m_least = metrics_by_combo.get((rho, "LeastAllocated"))
+        m_most = metrics_by_combo.get((rho, "MostAllocated"))
+        if m_least is not None and m_most is not None:
+            results += check_sanity_scheduler_effect(m_least, m_most)
+        else:
+            results.append(
+                CheckResult(
+                    name=f"sanity: scheduler effect on cluster_std (rho={rho})",
+                    passed=False,
+                    detail=f"material missing: both schedulers' records at rho={rho} are needed",
+                )
+            )
+
+    return results

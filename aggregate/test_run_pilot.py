@@ -25,13 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import aggregate
 import run_pilot
 
-BUILDINPUT_SUMMARY_TEXT = (
-    "used pods:     800\n"
-    "excluded pods: 200\n"
-    "failed pods:   12\n"
-    "rho (before):  0.734521\n"
-    "rho (after):   1.100000\n"
-)
+BUILDINPUT_SUMMARY_TEXT = "used pods:     800\nexcluded pods: 200\nfailed pods:   12\nrho (before):  0.734521\nrho (after):   1.100000\n"
 
 
 def test_parse_buildinput_summary_reads_every_field() -> None:
@@ -133,19 +127,19 @@ def _transition(time: str, seq: int, operation: str, component_id: str, state: s
 
 
 def _header(**overrides) -> aggregate.RunHeader:
-    fields = dict(
-        evaluation_id="eval-1",
-        scenario_id="rho1p1-leastallocated",
-        iteration=0,
-        trace_name="openb",
-        trace_version="openb_pod_list_default",
-        reference_commit="abc123",
-        input_seed="1",
-        rho=1.1,
-        evaluator_commit="def456",
-        hardware="test-machine",
-        scheduler_profile="LeastAllocated",
-    )
+    fields = {
+        "evaluation_id": "eval-1",
+        "scenario_id": "rho1p1-leastallocated",
+        "iteration": 0,
+        "trace_name": "openb",
+        "trace_version": "openb_pod_list_default",
+        "reference_commit": "abc123",
+        "input_seed": "1",
+        "rho": 1.1,
+        "evaluator_commit": "def456",
+        "hardware": "test-machine",
+        "scheduler_profile": "LeastAllocated",
+    }
     fields.update(overrides)
     return aggregate.RunHeader(**fields)
 
@@ -386,13 +380,25 @@ def test_check_scenario6_fails_when_the_unplaceable_free_row_is_missing() -> Non
 
 def _create(time_sec: int, seq: int, task_id: str, instance_id: str) -> aggregate.Transition:
     return _transition(
-        f"2024-01-01T00:00:{time_sec:02d}.000000000Z", seq, "create_task", instance_id, state="instance_status", task_id=task_id, after="pending"
+        f"2024-01-01T00:00:{time_sec:02d}.000000000Z",
+        seq,
+        "create_task",
+        instance_id,
+        state="instance_status",
+        task_id=task_id,
+        after="pending",
     )
 
 
 def _complete(time_sec: int, seq: int, task_id: str, instance_id: str) -> aggregate.Transition:
     return _transition(
-        f"2024-01-01T00:00:{time_sec:02d}.000000000Z", seq, "complete", instance_id, state="instance_status", task_id=task_id, after="completed"
+        f"2024-01-01T00:00:{time_sec:02d}.000000000Z",
+        seq,
+        "complete",
+        instance_id,
+        state="instance_status",
+        task_id=task_id,
+        after="completed",
     )
 
 
@@ -425,7 +431,9 @@ def test_check_sanity_counts_fails_when_a_pod_is_still_running_at_the_end() -> N
         header=_header(),
         transitions=[
             _create(0, 1, "task-1", "instance-1"),
-            _transition("2024-01-01T00:00:05.000000000Z", 2, "start", "instance-1", state="instance_status", task_id="task-1", after="running"),
+            _transition(
+                "2024-01-01T00:00:05.000000000Z", 2, "start", "instance-1", state="instance_status", task_id="task-1", after="running"
+            ),
         ],
     )
 
@@ -439,14 +447,14 @@ def test_check_sanity_counts_fails_when_a_pod_is_still_running_at_the_end() -> N
 
 
 def _metrics(**overrides) -> aggregate.Metrics:
-    fields = dict(
-        pending_wait_by_class={"0": [1.0, 2.0]},
-        pending_count_at_end=0,
-        allocation_rate={"cpu": 0.5},
-        unplaceable_free={"cpu": 10.0},
-        cluster_std=0.2,
-        nonzero_wait_fraction=0.5,
-    )
+    fields = {
+        "pending_wait_by_class": {"0": [1.0, 2.0]},
+        "pending_count_at_end": 0,
+        "allocation_rate": {"cpu": 0.5},
+        "unplaceable_free": {"cpu": 10.0},
+        "cluster_std": 0.2,
+        "nonzero_wait_fraction": 0.5,
+    }
     fields.update(overrides)
     return aggregate.Metrics(**fields)
 
@@ -585,7 +593,14 @@ def _good_combo_record(rho: float, scheduler_profile: str) -> aggregate.RunRecor
             _transition("2024-01-01T00:00:00.000000000Z", 1, "register_node", "node-1", state="resource_capacity", after={"cpu": "10"}),
             _create(0, 2, "task-1", "instance-1"),
             _transition(
-                "2024-01-01T00:00:05.000000000Z", 3, "start", "instance-1", state="instance_status", task_id="task-1", before="pending", after="running"
+                "2024-01-01T00:00:05.000000000Z",
+                3,
+                "start",
+                "instance-1",
+                state="instance_status",
+                task_id="task-1",
+                before="pending",
+                after="running",
             ),
             _complete(10, 4, "task-1", "instance-1"),
         ],
@@ -593,20 +608,20 @@ def _good_combo_record(rho: float, scheduler_profile: str) -> aggregate.RunRecor
 
 
 def _good_run_all_checks_kwargs() -> dict:
-    return dict(
-        buildinput_summary_low_rho=run_pilot.BuildInputSummary(used_pods=1, excluded_pods=0, failed_pods=0, rho_before=0.3, rho_after=0.5),
-        buildinput_summary_high_rho=run_pilot.BuildInputSummary(used_pods=1, excluded_pods=0, failed_pods=0, rho_before=0.3, rho_after=1.1),
-        eligible_pods=1,
-        ratio=1.0,
-        records=[
+    return {
+        "buildinput_summary_low_rho": run_pilot.BuildInputSummary(used_pods=1, excluded_pods=0, failed_pods=0, rho_before=0.3, rho_after=0.5),
+        "buildinput_summary_high_rho": run_pilot.BuildInputSummary(used_pods=1, excluded_pods=0, failed_pods=0, rho_before=0.3, rho_after=1.1),
+        "eligible_pods": 1,
+        "ratio": 1.0,
+        "records": [
             _good_combo_record(0.5, "LeastAllocated"),
             _good_combo_record(0.5, "MostAllocated"),
             _good_combo_record(1.1, "LeastAllocated"),
             _good_combo_record(1.1, "MostAllocated"),
         ],
-        report_text=GOOD_REPORT_TEXT,
-        existing_figures={"figures/rho-0.5-wait.png", "figures/rho-1.1-wait.png"},
-    )
+        "report_text": GOOD_REPORT_TEXT,
+        "existing_figures": {"figures/rho-0.5-wait.png", "figures/rho-1.1-wait.png"},
+    }
 
 
 def test_run_all_checks_returns_only_passing_results_for_well_formed_inputs() -> None:
