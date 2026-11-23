@@ -525,6 +525,41 @@ def test_compute_metrics_leaves_unplaceable_free_empty_for_a_record_with_no_inte
     assert metrics.unplaceable_free == {}
 
 
+# --- final_instance_statuses ---
+
+
+def test_final_instance_statuses_reports_pending_running_and_completed() -> None:
+    # units/U05.md 数が合う: a pod's final status at the end of observation
+    # must be one of "completed" or "pending" (a bug would leave one stuck
+    # "running" or vanish from the replay entirely).
+    b = RecordBuilder()
+    b.create_task(0, "task-1", "instance-1")  # stays pending
+    b.create_task(0, "task-2", "instance-2")
+    b.bind(5, "task-2", "instance-2", "node-1", {"cpu": "1"})  # stays running
+    b.create_task(0, "task-3", "instance-3")
+    b.bind(5, "task-3", "instance-3", "node-1", {"cpu": "1"})
+    b.complete(10, "task-3", "instance-3", "node-1", {"cpu": "1"})
+
+    statuses = aggregate.final_instance_statuses(b.transitions)
+
+    assert statuses == {
+        "instance-1": "pending",
+        "instance-2": "running",
+        "instance-3": "completed",
+    }
+
+
+def test_final_instance_statuses_reports_deleted_after_preemption() -> None:
+    b = RecordBuilder()
+    b.create_task(0, "task-1", "instance-1")
+    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    b.delete(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+
+    statuses = aggregate.final_instance_statuses(b.transitions)
+
+    assert statuses == {"instance-1": "deleted"}
+
+
 # --- DiffResult ---
 
 

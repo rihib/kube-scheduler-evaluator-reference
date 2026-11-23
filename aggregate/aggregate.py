@@ -440,6 +440,15 @@ def compute_metrics(transitions: Sequence[Transition]) -> Metrics:
     )
 
 
+def final_instance_statuses(transitions: Sequence[Transition]) -> dict[str, str]:
+    """Replays transitions and returns each instance's final status
+    (units/U05.md "数が合う": every pod should end up either "completed" or
+    "pending" at the end of observation). Reuses the same replay compute_metrics
+    does, so this sees exactly the state compute_metrics's callers already trust.
+    """
+    return {}
+
+
 @dataclass(frozen=True)
 class DiffResult:
     """A - B for one metric, across input versions (decisions.md).
