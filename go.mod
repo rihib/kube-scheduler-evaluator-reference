@@ -122,4 +122,4 @@ replace (
 	k8s.io/kube-scheduler => k8s.io/kube-scheduler v0.32.7
 )
 
-replace github.com/pfnet/kube-scheduler-evaluator => github.com/rihib/kube-scheduler-evaluator v0.0.0-20261121185917-c63a4ee37ec1
+replace github.com/pfnet/kube-scheduler-evaluator => github.com/rihib/kube-scheduler-evaluator v0.0.0-20261123220711-7a973146156e
