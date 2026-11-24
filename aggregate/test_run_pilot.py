@@ -1088,6 +1088,77 @@ def test_run_returns_zero_and_prints_only_pass_lines_when_every_check_passes(tmp
     assert exit_code == 0
 
 
+def _recording_subprocess(buildinput_stdout_by_rho: dict[str, str], calls: list[list[str]]):
+    """_make_fake_subprocess, plus a record of every argument list it saw, so
+    a test can assert what run() asked the Go commands to do."""
+    fake = _make_fake_subprocess(buildinput_stdout_by_rho)
+
+    def recording(args: list[str]):
+        calls.append(args)
+        return fake(args)
+
+    return recording
+
+
+def _write_four_good_records(records_dir: Path) -> None:
+    records_dir.mkdir(parents=True, exist_ok=True)
+    for rho, scheduler in [(0.5, "LeastAllocated"), (0.5, "MostAllocated"), (1.1, "LeastAllocated"), (1.1, "MostAllocated")]:
+        _write_record(records_dir / f"rho{rho}-{scheduler}.jsonl", _good_combo_record(rho, scheduler))
+
+
+def _write_tiny_csvs(tmp_path: Path) -> tuple[Path, Path]:
+    nodes_csv, pods_csv = tmp_path / "nodes.csv", tmp_path / "openb_pod_list_test.csv"
+    nodes_csv.write_text("sn,cpu_milli,memory_mib,gpu,model\nnode-1,4000,8192,0,\n")
+    pods_csv.write_text(POD_CSV_HEADER + "pod-1,100,100,0,0,,BestEffort,Running,0,10,0\n")
+    return nodes_csv, pods_csv
+
+
+def test_run_has_buildinput_write_each_input_version_under_the_output_directory(tmp_path: Path) -> None:
+    # units/U05.md: 入力の版、記録、報告の書き出し先は、引数で受け取る. Without
+    # this, the input version was never written anywhere at all — buildinput
+    # only printed its summary — so which version an experiment ran against
+    # was not recoverable afterwards (round1 review, correctness Must 4).
+    out_dir = tmp_path / "out"
+    _write_four_good_records(out_dir / "records")
+    nodes_csv, pods_csv = _write_tiny_csvs(tmp_path)
+    calls: list[list[str]] = []
+
+    run_pilot.run(
+        ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--ratio", "1.0", "--out", str(out_dir)],
+        run_subprocess=_recording_subprocess(_GOOD_BUILDINPUT_STDOUT, calls),
+    )
+
+    written = [call[call.index("--out") + 1] for call in calls if "./cmd/buildinput" in call]
+    assert written == [str(out_dir / "input" / "rho-0.5.jsonl"), str(out_dir / "input" / "rho-1.1.jsonl")]
+
+
+def test_run_has_buildinput_write_the_input_version_to_the_directory_the_argument_names(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+    input_dir = tmp_path / "elsewhere" / "versions"
+    _write_four_good_records(out_dir / "records")
+    nodes_csv, pods_csv = _write_tiny_csvs(tmp_path)
+    calls: list[list[str]] = []
+
+    run_pilot.run(
+        [
+            "--nodes",
+            str(nodes_csv),
+            "--pods",
+            str(pods_csv),
+            "--ratio",
+            "1.0",
+            "--out",
+            str(out_dir),
+            "--input-version-dir",
+            str(input_dir),
+        ],
+        run_subprocess=_recording_subprocess(_GOOD_BUILDINPUT_STDOUT, calls),
+    )
+
+    written = [call[call.index("--out") + 1] for call in calls if "./cmd/buildinput" in call]
+    assert written == [str(input_dir / "rho-0.5.jsonl"), str(input_dir / "rho-1.1.jsonl")]
+
+
 def test_the_default_output_directory_is_outside_the_repository() -> None:
     # units/U05.md: 既定では、このタスクの文書のフォルダの下に書く。Writing
     # inside the repository instead makes cmd/runpilot's own "git status
