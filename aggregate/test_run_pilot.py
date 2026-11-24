@@ -1022,17 +1022,19 @@ def test_run_returns_zero_and_prints_only_pass_lines_when_every_check_passes(tmp
     # Reusing _fully_passing_run_all_checks_kwargs's records as-is does not
     # reach exit_code == 0 here: unlike run_all_checks (which takes
     # report_text/existing_figures directly), run() generates the report for
-    # real from these records via aggregate.run(), which (1) needs each
-    # record's scheduler_profile to equal run()'s own --distributed-scheduler
-    # value exactly (the full schedulerprofile.Pilot description, not the
-    # bare name _fully_passing_record uses) for scenario 6's prediction
-    # section to resolve at all, and (2) needs an actual GPU-8 class and
+    # real from these records via aggregate.run(), which (1) needs the two
+    # schedulers' profiles to be told apart as the real ones are — the full
+    # schedulerprofile.Pilot descriptions, not the bare name
+    # _fully_passing_record uses — for scenario 6's prediction section to
+    # resolve at all, and (2) needs an actual GPU-8 class and
     # resource-fragmentation scenario in the data for that section's wait:8/
     # unplaceable_free rows to have something to show. Found while
     # attempting the reuse the round-2 review suggested; this dedicated
     # fixture adds both instead of changing the shared one every other test
     # in this file already relies on.
-    least_desc = run_pilot._LEAST_ALLOCATED_DESCRIPTION
+    least_desc = (
+        "NodeResourcesFit(scoringStrategy=LeastAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled"
+    )
     most_desc = (
         "NodeResourcesFit(scoringStrategy=MostAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled"
     )

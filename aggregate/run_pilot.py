@@ -729,12 +729,34 @@ def _run_subprocess(args: list[str]):
     return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
+@dataclass(frozen=True)
+class _FailedToStart:
+    """Stands in for a completed process when the command could not be started
+    at all (no "go" on PATH, for instance), so a caller can report it the same
+    way as a nonzero exit instead of dying on the OSError."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def _run_command(run_subprocess, args: list[str]):
+    """Runs one command, turning "could not even start it" into a failed
+    result: the command must still reach every check (units/U05.md: "コマンド
+    は、すべての項目を確かめ終えてから終わる")."""
+    try:
+        return run_subprocess(args)
+    except OSError as e:
+        return _FailedToStart(returncode=1, stdout="", stderr=f"could not run {' '.join(args)}: {e}")
+
+
 _PILOT_RHOS = (aggregate.RHO_NEGATIVE_CONTROL, aggregate.RHO_HIGH_LOAD)
-# The exact scheduler_profile header value cmd/runpilot's LeastAllocated runs
-# carry (scenarios/schedulerprofile/schedulerprofile.go's description format).
-_LEAST_ALLOCATED_DESCRIPTION = (
-    "NodeResourcesFit(scoringStrategy=LeastAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled"
-)
+# The scoring strategy experiment.md 3.1's distributed-type scheduler uses.
+# Only the strategy name is written here, never a whole scheduler_profile
+# description: the description's wording belongs to the Go side
+# (scenarios/schedulerprofile/schedulerprofile.go), and is read back out of
+# the records instead (_distributed_scheduler_profile).
+_DISTRIBUTED_SCORING_STRATEGY = "LeastAllocated"
 
 
 @dataclass(frozen=True)
@@ -773,7 +795,8 @@ def _build_input_versions(args, *, run_subprocess, input_version_dir: Path) -> d
     unparseable)."""
     summaries: dict[float, BuildInputSummary | None] = {}
     for rho in _PILOT_RHOS:
-        proc = run_subprocess(
+        proc = _run_command(
+            run_subprocess,
             [
                 "go",
                 "run",
@@ -793,7 +816,7 @@ def _build_input_versions(args, *, run_subprocess, input_version_dir: Path) -> d
                 # (units/U05.md: "入力の版...の書き出し先は、引数で受け取る").
                 "--out",
                 str(input_version_dir / f"rho-{rho}.jsonl"),
-            ]
+            ],
         )
         if proc.returncode != 0:
             print(f"run_pilot: buildinput failed for rho={rho}:\n{proc.stderr}", file=sys.stderr)
@@ -834,6 +857,27 @@ def _read_records(records_dir: Path) -> list[aggregate.RunRecord]:
     return records
 
 
+def _distributed_scheduler_profile(records: Sequence[aggregate.RunRecord]) -> str | None:
+    """The scheduler_profile value to pass as aggregate.run's
+    --distributed-scheduler: the LeastAllocated profile as the records
+    themselves spell it (experiment.md 3.1's distributed-type scheduler).
+
+    Read from the records rather than written out here because aggregate.py's
+    build_rho_sections compares the value to a record's scheduler_profile by
+    equality, while cmd/runpilot writes schedulerprofile.Pilot's whole
+    description ("NodeResourcesFit(scoringStrategy=LeastAllocated, ...)"): a
+    copy of that string here would stop matching the moment the Go side
+    reworded it, and scenario 6's prediction section would silently report the
+    distributed scheduler as not found.
+
+    None when no record names LeastAllocated — there is then nothing to point
+    aggregate at, and scenario 6's own check reports the consequence."""
+    for record in records:
+        if _DISTRIBUTED_SCORING_STRATEGY in record.header.scheduler_profile:
+            return record.header.scheduler_profile
+    return None
+
+
 def _run_pipeline(args, *, run_subprocess, input_version_dir: Path, records_dir: Path, report_dir: Path) -> _PipelineOutputs:
     """Runs the three stages in order and gathers what they produced. A stage
     that fails is reported on stderr and leaves its output missing; the
@@ -841,7 +885,8 @@ def _run_pipeline(args, *, run_subprocess, input_version_dir: Path, records_dir:
     pipeline actually managed to produce."""
     summaries = _build_input_versions(args, run_subprocess=run_subprocess, input_version_dir=input_version_dir)
 
-    runpilot_proc = run_subprocess(
+    runpilot_proc = _run_command(
+        run_subprocess,
         [
             "go",
             "run",
@@ -860,24 +905,20 @@ def _run_pipeline(args, *, run_subprocess, input_version_dir: Path, records_dir:
             "1",
             "--out",
             str(records_dir),
-        ]
+        ],
     )
     if runpilot_proc.returncode != 0:
         print(f"run_pilot: runpilot failed:\n{runpilot_proc.stderr}", file=sys.stderr)
 
     records = _read_records(records_dir)
 
-    # aggregate.run's --distributed-scheduler must match a record's
-    # scheduler_profile exactly (aggregate.py's build_rho_sections compares
-    # it to section.scheduler_order by equality, not containment); its own
-    # default is the bare "LeastAllocated", but cmd/runpilot's header carries
-    # schedulerprofile.Pilot's full description. Without this, scenario 6's
-    # ρ = 1.1 prediction section always reports the distributed scheduler as
-    # "not found" — found running against real openb data (units/U05.md's
-    # "先に抜き出す割合を小さくした入力で1回通す" step).
-    agg_exit = aggregate.run(
-        ["--records-dir", str(records_dir), "--output-dir", str(report_dir), "--distributed-scheduler", _LEAST_ALLOCATED_DESCRIPTION]
-    )
+    agg_argv = ["--records-dir", str(records_dir), "--output-dir", str(report_dir)]
+    distributed = _distributed_scheduler_profile(records)
+    if distributed is None:
+        print("run_pilot: no record's scheduler_profile names LeastAllocated; leaving --distributed-scheduler at its default", file=sys.stderr)
+    else:
+        agg_argv += ["--distributed-scheduler", distributed]
+    agg_exit = aggregate.run(agg_argv)
     if agg_exit != 0:
         print(f"run_pilot: aggregate report command failed (exit code {agg_exit})", file=sys.stderr)
 
