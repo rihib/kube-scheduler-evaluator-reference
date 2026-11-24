@@ -145,6 +145,16 @@ def _check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
     has_capacity = any(t.operation == aggregate.OpRegisterNode and t.state == aggregate.StateResourceCapacity for t in record.transitions)
     times = [aggregate.parse_time(t.time) for t in record.transitions]
     monotonic = all(times[i] <= times[i + 1] for i in range(len(times) - 1))
+
+    # The time-order check above cannot stand in for this one: a run where
+    # nothing was ever placed has no assign/complete transition to order, so
+    # it would satisfy "non-decreasing" vacuously while carrying none of the
+    # placement history scenario 2 is about. parse_time raising would have
+    # already stopped the checks, so a found transition's time is parseable.
+    missing_ops = [
+        op for op in (aggregate.OpAssignNode, aggregate.OpComplete) if not any(t.operation == op and t.time for t in record.transitions)
+    ]
+    placement_ok = not missing_ops
     return [
         CheckResult(
             name="scenario2: header names seed, rho, scheduler, commits, and hardware",
@@ -155,6 +165,11 @@ def _check_scenario2(record: aggregate.RunRecord) -> list[CheckResult]:
             name="scenario2: initial node capacity is recorded",
             passed=has_capacity,
             detail="ok" if has_capacity else "no register_node/resource_capacity transition found",
+        ),
+        CheckResult(
+            name="scenario2: assign and complete transitions are recorded with a virtual time",
+            passed=placement_ok,
+            detail="ok" if placement_ok else f"no transition with a virtual time found for operation(s): {missing_ops}",
         ),
         CheckResult(
             name="scenario2: transitions carry non-decreasing virtual time",
