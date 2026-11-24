@@ -98,9 +98,31 @@ def _count_eligible_pods(pods_csv_text: str) -> int:
     sampleRatio: every row except the header and "Pending" ones
     (scenarios/clusterdata/input_version.go). Used to compute the expected
     used-pod count independently of what buildinput itself reports
-    (units/U05.md scenario 1's "Pendingを除いたPodの80%")."""
-    reader = csv.DictReader(io.StringIO(pods_csv_text))
-    return sum(1 for row in reader if row["pod_phase"].strip().lower() != "pending")
+    (units/U05.md scenario 1's "Pendingを除いたPodの80%").
+
+    Raises ValueError naming the problem if the text is not a pod CSV of the
+    openb shape (no pod_phase column, or a row whose column count does not
+    match the header). The caller cannot tell a wrong count from a right one,
+    so a malformed CSV must be a refusal, not a number."""
+    try:
+        reader = csv.DictReader(io.StringIO(pods_csv_text))
+        fieldnames = reader.fieldnames
+        if not fieldnames or "pod_phase" not in fieldnames:
+            raise ValueError(f"pod CSV has no pod_phase column (columns: {fieldnames})")
+
+        eligible = 0
+        for line_number, row in enumerate(reader, start=2):
+            # DictReader pads a short row with None and collects a long row's
+            # surplus under the None key, so both show up as a column-count
+            # mismatch — including the row an unclosed quote swallows the rest
+            # of the file into.
+            if None in row or any(value is None for value in row.values()):
+                raise ValueError(f"pod CSV line {line_number} does not have the header's {len(fieldnames)} columns")
+            if row["pod_phase"].strip().lower() != "pending":
+                eligible += 1
+        return eligible
+    except csv.Error as e:
+        raise ValueError(f"pod CSV could not be parsed: {e}") from e
 
 
 def _expected_sampled_count(eligible: int, ratio: float) -> int:
@@ -713,39 +735,43 @@ _PILOT_RHOS = (aggregate.RHO_NEGATIVE_CONTROL, aggregate.RHO_HIGH_LOAD)
 _LEAST_ALLOCATED_DESCRIPTION = (
     "NodeResourcesFit(scoringStrategy=LeastAllocated, resources=cpu:1,memory:1,nvidia.com/gpu:1); NodeResourcesBalancedAllocation disabled"
 )
-_MISSING_BUILDINPUT_SUMMARY = BuildInputSummary(
-    used_pods=-1, excluded_pods=-1, failed_pods=-1, rho_before=float("nan"), rho_after=float("nan")
-)
 
 
-def run(argv: list[str], *, run_subprocess=None) -> int:
-    """The pilot command (units/U05.md): builds one openb input version per
-    rho (cmd/buildinput, run once per rho so scenario 1's own numbers are
-    for rho=1.1 while the sanity checks also see rho=0.5's), runs all four
-    (rho, scheduler) combinations (cmd/runpilot), aggregates them into a
-    report (aggregate.run, in-process since both are this same Python
-    module), and machine-checks every Scenario 1-6 Then plus the numeric
-    sanity checks (run_all_checks). Must be run from the repository root, so
-    "go run ./cmd/..." resolves.
+@dataclass(frozen=True)
+class _PipelineOutputs:
+    """Everything the three pipeline stages (buildinput, runpilot, aggregate)
+    leave behind for the checks to read. A stage that produced nothing leaves
+    None (or an empty report), which run_all_checks reports as material
+    missing rather than as a zero."""
 
-    run_subprocess is injected so a test can observe or fake the "go run"
-    calls without actually invoking Go; the default runs them for real.
-    """
-    run_subprocess = run_subprocess or _run_subprocess
-    args = _parse_args(argv)
-    out_dir = Path(args.out)
-    records_dir = out_dir / "records"
-    report_dir = out_dir / "report"
-    input_version_dir = Path(args.input_version_dir) if args.input_version_dir else out_dir / "input"
+    summaries: dict[float, BuildInputSummary | None]
+    records: list[aggregate.RunRecord]
+    report_text: str
+    existing_figures: set[str]
 
+
+_NOTHING_RAN = _PipelineOutputs(summaries=dict.fromkeys(_PILOT_RHOS), records=[], report_text="", existing_figures=set())
+
+
+def _read_eligible_pod_count(pods_path: str) -> int | None:
+    """The non-Pending pod count the checks compare buildinput's own numbers
+    against, or None when the CSV cannot be read or is not of the openb shape.
+    None (not an exception, and not an early return) so the command still
+    reaches every check (units/U05.md: "コマンドは、すべての項目を確かめ終えて
+    から終わる")."""
     try:
-        pods_text = Path(args.pods).read_text(encoding="utf-8")
-    except OSError as e:
-        print(f"run_pilot: failed to read {args.pods}: {e}", file=sys.stderr)
-        return 1
-    eligible_pods = _count_eligible_pods(pods_text)
+        return _count_eligible_pods(Path(pods_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"run_pilot: cannot count the pods in {pods_path}: {e}", file=sys.stderr)
+        return None
 
-    summaries: dict[float, BuildInputSummary] = {}
+
+def _build_input_versions(args, *, run_subprocess, input_version_dir: Path) -> dict[float, BuildInputSummary | None]:
+    """Builds one input version per rho with cmd/buildinput, writing each
+    version itself under input_version_dir, and returns the summaries it
+    printed (None for a rho whose run failed or printed something
+    unparseable)."""
+    summaries: dict[float, BuildInputSummary | None] = {}
     for rho in _PILOT_RHOS:
         proc = run_subprocess(
             [
@@ -771,13 +797,49 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
         )
         if proc.returncode != 0:
             print(f"run_pilot: buildinput failed for rho={rho}:\n{proc.stderr}", file=sys.stderr)
-            summaries[rho] = _MISSING_BUILDINPUT_SUMMARY
+            summaries[rho] = None
             continue
         try:
             summaries[rho] = _parse_buildinput_summary(proc.stdout)
         except ValueError as e:
             print(f"run_pilot: could not parse buildinput's output for rho={rho}: {e}", file=sys.stderr)
-            summaries[rho] = _MISSING_BUILDINPUT_SUMMARY
+            summaries[rho] = None
+    return summaries
+
+
+def _read_records(records_dir: Path) -> list[aggregate.RunRecord]:
+    """Reads the records cmd/runpilot wrote, dropping the truncated ones and
+    saying how many were dropped and why (a silently shorter list would show
+    up only as scenario 3's "got 3", with the reason gone)."""
+    try:
+        texts = aggregate.read_record_texts_from_folder(records_dir)
+    except OSError as e:
+        print(f"run_pilot: failed to read the records in {records_dir}: {e}", file=sys.stderr)
+        return []
+
+    records: list[aggregate.RunRecord] = []
+    for name, text in texts:
+        try:
+            record = aggregate.parse_record(text)
+        except (ValueError, KeyError) as e:
+            print(f"run_pilot: skipping {name}: could not be parsed: {e}", file=sys.stderr)
+            continue
+        if record.truncated:
+            print(f"run_pilot: skipping {name}: the record is truncated", file=sys.stderr)
+            continue
+        if not record.transitions:
+            print(f"run_pilot: skipping {name}: the record has no transition", file=sys.stderr)
+            continue
+        records.append(record)
+    return records
+
+
+def _run_pipeline(args, *, run_subprocess, input_version_dir: Path, records_dir: Path, report_dir: Path) -> _PipelineOutputs:
+    """Runs the three stages in order and gathers what they produced. A stage
+    that fails is reported on stderr and leaves its output missing; the
+    remaining stages still run, so the checks see as much material as the
+    pipeline actually managed to produce."""
+    summaries = _build_input_versions(args, run_subprocess=run_subprocess, input_version_dir=input_version_dir)
 
     runpilot_proc = run_subprocess(
         [
@@ -803,13 +865,7 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
     if runpilot_proc.returncode != 0:
         print(f"run_pilot: runpilot failed:\n{runpilot_proc.stderr}", file=sys.stderr)
 
-    try:
-        texts = aggregate.read_record_texts_from_folder(records_dir)
-        parsed = [aggregate.parse_record(text) for _, text in texts]
-        records = [r for r in parsed if not r.truncated and r.transitions]
-    except (OSError, ValueError, KeyError) as e:
-        print(f"run_pilot: failed to read records from {records_dir}: {e}", file=sys.stderr)
-        records = []
+    records = _read_records(records_dir)
 
     # aggregate.run's --distributed-scheduler must match a record's
     # scheduler_profile exactly (aggregate.py's build_rho_sections compares
@@ -830,14 +886,60 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
     figures_dir = report_dir / "figures"
     existing_figures = {f"figures/{p.name}" for p in figures_dir.glob("*.png")} if figures_dir.exists() else set()
 
+    return _PipelineOutputs(summaries=summaries, records=records, report_text=report_text, existing_figures=existing_figures)
+
+
+def run(argv: list[str], *, run_subprocess=None) -> int:
+    """The pilot command (units/U05.md): builds one openb input version per
+    rho (cmd/buildinput, run once per rho so scenario 1's own numbers are
+    for rho=1.1 while the sanity checks also see rho=0.5's), runs all four
+    (rho, scheduler) combinations (cmd/runpilot), aggregates them into a
+    report (aggregate.run, in-process since both are this same Python
+    module), and machine-checks every Scenario 1-6 Then plus the numeric
+    sanity checks (run_all_checks). Must be run from the repository root, so
+    "go run ./cmd/..." resolves.
+
+    run_subprocess is injected so a test can observe or fake the "go run"
+    calls without actually invoking Go; the default runs them for real.
+    """
+    run_subprocess = run_subprocess or _run_subprocess
+    args = _parse_args(argv)
+    out_dir = Path(args.out)
+    records_dir = out_dir / "records"
+    report_dir = out_dir / "report"
+    input_version_dir = Path(args.input_version_dir) if args.input_version_dir else out_dir / "input"
+
+    eligible_pods = _read_eligible_pod_count(args.pods)
+
+    # cmd/runpilot writes time-stamped file names, so running into a folder
+    # that already holds records would leave both runs' records side by side:
+    # scenario 3 would fail with "got 8" and the report would mix them. Refuse
+    # instead, leaving the earlier run's records untouched.
+    existing_records = sorted(records_dir.glob("*.jsonl")) if records_dir.is_dir() else []
+    if existing_records:
+        print(
+            f"run_pilot: {records_dir} already holds {len(existing_records)} record file(s) from an earlier run; "
+            f"remove them or pass a different --out",
+            file=sys.stderr,
+        )
+        outputs = _NOTHING_RAN
+    else:
+        outputs = _run_pipeline(
+            args,
+            run_subprocess=run_subprocess,
+            input_version_dir=input_version_dir,
+            records_dir=records_dir,
+            report_dir=report_dir,
+        )
+
     results = run_all_checks(
-        buildinput_summary_low_rho=summaries[aggregate.RHO_NEGATIVE_CONTROL],
-        buildinput_summary_high_rho=summaries[aggregate.RHO_HIGH_LOAD],
+        buildinput_summary_low_rho=outputs.summaries[aggregate.RHO_NEGATIVE_CONTROL],
+        buildinput_summary_high_rho=outputs.summaries[aggregate.RHO_HIGH_LOAD],
         eligible_pods=eligible_pods,
         ratio=args.ratio,
-        records=records,
-        report_text=report_text,
-        existing_figures=existing_figures,
+        records=outputs.records,
+        report_text=outputs.report_text,
+        existing_figures=outputs.existing_figures,
     )
 
     print(_format_results(results))

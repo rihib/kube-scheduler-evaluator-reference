@@ -1153,9 +1153,7 @@ def test_run_has_buildinput_write_the_input_version_to_the_directory_the_argumen
     assert written == [str(input_dir / "rho-0.5.jsonl"), str(input_dir / "rho-1.1.jsonl")]
 
 
-def test_run_refuses_to_run_when_the_records_directory_already_holds_records(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_run_refuses_to_run_when_the_records_directory_already_holds_records(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # cmd/runpilot writes time-stamped file names, so a second run against the
     # same --out used to leave 8 records behind: scenario 3 then failed with
     # "expected 4 records, got 8" and the report mixed both runs' records
