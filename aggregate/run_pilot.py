@@ -16,7 +16,7 @@ This command is intentionally left out of run_checks.sh and check-range.txt
 (units/U05.md): running it against the full openb trace takes longer than the
 10-minute budget those scripts give the whole check range.
 
-Usage: uv run aggregate/run_pilot.py --out pilot-run
+Usage: uv run aggregate/run_pilot.py [--out <directory>]
 """
 
 from __future__ import annotations
@@ -627,6 +627,14 @@ def _format_results(results: Sequence[CheckResult]) -> str:
     return "\n".join(f"[{'PASS' if r.passed else 'FAIL'}] {r.name}: {r.detail}" for r in results)
 
 
+# units/U05.md: 既定では、このタスクの文書のフォルダの下に書く。That folder is
+# outside the repository on purpose: cmd/runpilot stamps every record's
+# reference_commit from "git status --porcelain" (cmd/runpilot/main.go), so an
+# untracked output folder inside the repository would make every record claim
+# it came from a "-dirty" tree.
+DEFAULT_OUT_DIR = Path.home() / ".rihib-skills" / "rihib" / "rihib" / "maui" / "experiment1-pilot" / "pilot-run"
+
+
 def _parse_args(argv: list[str]):
     import argparse
 
@@ -635,7 +643,11 @@ def _parse_args(argv: list[str]):
     parser.add_argument("--pods", default=".cache/clusterdata/openb_pod_list_default.csv", help="openb pod list CSV")
     parser.add_argument("--seed", type=int, default=1, help="seed for sampling and ordering pods (cmd/buildinput, cmd/runpilot)")
     parser.add_argument("--ratio", type=float, default=0.8, help="fraction of non-Pending pods to keep")
-    parser.add_argument("--out", default="pilot-run", help="directory the records/ and report/ subdirectories are written under")
+    parser.add_argument(
+        "--out",
+        default=str(DEFAULT_OUT_DIR),
+        help="directory the input/, records/ and report/ subdirectories are written under",
+    )
     return parser.parse_args(argv)
 
 
