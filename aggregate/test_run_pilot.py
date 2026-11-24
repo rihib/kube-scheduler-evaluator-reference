@@ -540,6 +540,38 @@ def test_run_all_checks_flags_scenario4_when_the_per_run_table_is_missing() -> N
     assert check.passed is False
 
 
+def test_run_all_checks_flags_scenario4_when_the_per_run_table_has_no_wait_time_column() -> None:
+    # units/U05.md scenario 4 names five metrics the per-run table must carry,
+    # and クラスごとの待機時間 is one of them: aggregate.py's
+    # _render_per_run_table writes it as the nonzero_wait_fraction column, so
+    # dropping that column must fail this check (round1 review, correctness
+    # Must 1: it was the one metric of the five nothing checked).
+    kwargs = _good_run_all_checks_kwargs()
+    # The two rho sections' header rows are identical text; count=1 drops only
+    # ρ = 0.5's, leaving ρ = 1.1's table intact.
+    kwargs["report_text"] = GOOD_REPORT_TEXT.replace("nonzero_wait_fraction | ", "", 1)
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario4: every rho section has the five-metric per-run table")
+    assert check.passed is False
+
+
+def test_run_all_checks_flags_scenario4_when_a_rho_section_links_to_no_figure() -> None:
+    # The other half of units/U05.md scenario 4's クラスごとの待機時間: the
+    # per-class wait times appear only in the distribution figure, so a rho
+    # section linking to no figure at all must fail, instead of passing
+    # vacuously because "every referenced figure exists" is trivially true
+    # for zero references (round1 review, correctness Must 1 and IMO 7).
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = GOOD_REPORT_TEXT.replace("![pending wait time distribution for ρ = 1.1](figures/rho-1.1-wait.png)\n", "")
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario4: every rho section links to a wait-time distribution figure")
+    assert check.passed is False
+
+
 # --- scenario 5: negative control (ρ = 0.5) ---
 
 
