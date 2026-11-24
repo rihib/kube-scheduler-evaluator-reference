@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,86 @@ func TestRun_PrintsSummary(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout = %q, want it to contain %q", out, want)
 		}
+	}
+}
+
+// --out を渡すと、入力の版そのもの（イベントの列）がそのパスに JSONL で
+// 書き出される。1行が1つのイベントで、種類・次のイベントまでの間隔・
+// 対象のオブジェクトを持つ。要約だけでは、どの版で実験したかが残らない
+// （units/U05.md「入力の版、記録、報告の書き出し先は、引数で受け取る」）。
+func TestRun_WritesInputVersionToOutPath(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", nodesCSV)
+	podsPath := writeTempCSV(t, "pods.csv", podsCSV)
+	outPath := filepath.Join(t.TempDir(), "nested", "input-version.jsonl")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+		"--seed=1",
+		"--rho=1.1",
+		"--ratio=1.0",
+		"--out=" + outPath,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	content, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", outPath, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
+	// 1つのノードの Create、3つの Pod の Create、そのノードの Delete。
+	if len(lines) != 5 {
+		t.Fatalf("input version has %d line(s), want 5:\n%s", len(lines), content)
+	}
+	types := make([]string, 0, len(lines))
+	for i, line := range lines {
+		var event struct {
+			EventType string          `json:"event_type"`
+			Interval  string          `json:"interval"`
+			Object    json.RawMessage `json:"object"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("line %d is not JSON: %v (%q)", i+1, err, line)
+		}
+		if event.Interval == "" {
+			t.Errorf("line %d has no interval: %q", i+1, line)
+		}
+		if len(event.Object) == 0 {
+			t.Errorf("line %d has no object: %q", i+1, line)
+		}
+		types = append(types, event.EventType)
+	}
+	if types[0] != "Create" || types[len(types)-1] != "Delete" {
+		t.Errorf("event types = %v, want the first to be Create and the last Delete", types)
+	}
+	if !strings.Contains(string(content), "openb-pod-0000") {
+		t.Errorf("input version does not name the sampled pod openb-pod-0000:\n%s", content)
+	}
+}
+
+// --out のパスに書けないときは、終了コードが0でなく、stderr にその旨が出る。
+// 入力の版が残らないまま実験を進めると、どの版で動かしたかが分からなくなる。
+func TestRun_FailsWhenInputVersionCannotBeWritten(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", nodesCSV)
+	podsPath := writeTempCSV(t, "pods.csv", podsCSV)
+	// 既にファイルがあるパスの「下」には、ディレクトリを作れない。
+	blocker := writeTempCSV(t, "blocker", "not a directory\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+		"--out=" + filepath.Join(blocker, "input-version.jsonl"),
+	}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("exit code = 0, want nonzero")
+	}
+	if stderr.String() == "" {
+		t.Errorf("stderr is empty, want an error message")
 	}
 }
 
