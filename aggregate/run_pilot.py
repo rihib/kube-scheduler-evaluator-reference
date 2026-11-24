@@ -940,6 +940,12 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
     sanity checks (run_all_checks). Must be run from the repository root, so
     "go run ./cmd/..." resolves.
 
+    Every check is reported and the exit code is 1 if any of them failed
+    (units/U05.md), including when a stage never ran: a pod CSV that cannot be
+    counted, or a records folder that already holds an earlier run's records
+    (which this refuses to add to, since cmd/runpilot would leave both runs'
+    records side by side).
+
     run_subprocess is injected so a test can observe or fake the "go run"
     calls without actually invoking Go; the default runs them for real.
     """
