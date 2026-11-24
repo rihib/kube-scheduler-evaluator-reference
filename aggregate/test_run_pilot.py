@@ -1358,6 +1358,14 @@ def test_run_builds_records_and_report_from_a_tiny_openb_style_csv(tmp_path: Pat
     record_files = list((out_dir / "records").glob("*.jsonl"))
     assert len(record_files) == 4
     assert (out_dir / "report" / "report.md").exists()
+    # The input versions themselves, one per rho, so which input this run used
+    # stays on disk (units/U05.md: "入力の版...の書き出し先は、引数で受け取る").
+    # The tiny CSV has 4 non-Pending pods, so each version carries 4 pod
+    # Create events plus the node's Create and Delete.
+    for rho in (0.5, 1.1):
+        input_version = out_dir / "input" / f"rho-{rho}.jsonl"
+        assert input_version.exists(), input_version
+        assert len(input_version.read_text(encoding="utf-8").splitlines()) == 6
     # This tiny, 4-pod input is too small to show a real rho or scheduler
     # effect, or to sample a large-GPU-request pod for scenario 6, so a
     # confirmed 3 of the 46 checks fail and exit_code is 1, not 0 — that is
