@@ -1090,6 +1090,79 @@ def test_run_returns_zero_and_prints_only_pass_lines_when_every_check_passes(tmp
     assert exit_code == 0
 
 
+@pytest.mark.parametrize(
+    ("case", "buildinput_result"),
+    [
+        ("nonzero exit", SimpleNamespace(returncode=1, stdout="", stderr="buildinput: no such file\n")),
+        ("unparseable stdout", SimpleNamespace(returncode=0, stdout="something else entirely\n", stderr="")),
+        ("go is not installed", OSError("[Errno 2] No such file or directory: 'go'")),
+    ],
+)
+def test_run_reports_every_check_when_buildinput_produces_no_summary(
+    case: str, buildinput_result, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # units/U05.md: 前の段が落ちて後の項目の材料ができないときは、後の項目を
+    # 「材料が無い」として落とす. The checks that read buildinput's summary must
+    # say the material is missing — not report a stand-in number as a real
+    # mismatch, and not end in a traceback when "go" itself cannot be run
+    # (round1 review, correctness IMO 2 and IMO 4, test IMO 1).
+    out_dir = tmp_path / "out"
+    nodes_csv, pods_csv = _write_tiny_csvs(tmp_path)
+    good = _make_fake_subprocess(_GOOD_BUILDINPUT_STDOUT, FOUR_GOOD_RECORDS)
+
+    def fake(args: list[str]):
+        if "./cmd/buildinput" in args:
+            if isinstance(buildinput_result, OSError):
+                raise buildinput_result
+            return buildinput_result
+        return good(args)
+
+    exit_code = run_pilot.run(
+        ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--ratio", "1.0", "--out", str(out_dir)],
+        run_subprocess=fake,
+    )
+
+    captured = capsys.readouterr()
+    assert "[FAIL] scenario1: achieved rho matches the target: material missing" in captured.out, f"{case}: {captured.out}"
+    assert "[FAIL] sanity: rho=0.5 achieved matches the target: material missing" in captured.out, f"{case}: {captured.out}"
+    # The stages that did not depend on buildinput still ran, so the report's
+    # own checks are real verdicts rather than missing material.
+    assert "scenario3: four records exist: ok" in captured.out, f"{case}: {captured.out}"
+    assert exit_code == 1
+
+
+def test_run_passes_the_records_own_least_allocated_profile_to_the_aggregation(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # aggregate.run matches --distributed-scheduler against a record's
+    # scheduler_profile by equality, so run() used to carry a hand-copied
+    # duplicate of schedulerprofile.Pilot's description string; a format
+    # change on the Go side would then silently break scenario 6's prediction
+    # section (round1 review, correctness IMO 8). Taking the value from the
+    # records themselves keeps the two in step: a profile description that
+    # does not match the frozen copy must still resolve.
+    changed_least = "LeastAllocated profile, reworded on the Go side"
+    records = [
+        _good_combo_record(0.5, changed_least),
+        _good_combo_record(0.5, "MostAllocated profile"),
+        _good_combo_record(1.1, changed_least),
+        _good_combo_record(1.1, "MostAllocated profile"),
+    ]
+    out_dir = tmp_path / "out"
+    nodes_csv, pods_csv = _write_tiny_csvs(tmp_path)
+
+    run_pilot.run(
+        ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--ratio", "1.0", "--out", str(out_dir)],
+        run_subprocess=_make_fake_subprocess(_GOOD_BUILDINPUT_STDOUT, records),
+    )
+
+    report_text = (out_dir / "report" / "report.md").read_text(encoding="utf-8")
+    rho_1_1 = report_text.split("## ρ = 1.1", 1)[1]
+    # aggregate.py's _render_prediction_section writes "分散型として指定された
+    # スケジューラ...が見つからない" when --distributed-scheduler matches no
+    # record, and names the scheduler in the prediction sentence when it does.
+    assert "が見つからない" not in rho_1_1, rho_1_1
+    assert f"予測（experiment.md 3.1）: {changed_least} の方が" in rho_1_1, rho_1_1
+
+
 def _recording_subprocess(buildinput_stdout_by_rho: dict[str, str], calls: list[list[str]]):
     """_make_fake_subprocess, plus a record of every argument list it saw, so
     a test can assert what run() asked the Go commands to do."""
