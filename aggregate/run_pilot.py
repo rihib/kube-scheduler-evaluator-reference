@@ -141,7 +141,7 @@ _RHO_TOLERANCE = 1e-6
 # output still carries one line per item.
 _MISSING_SUMMARY = "buildinput's summary for this rho was not produced"
 _MISSING_POD_COUNT = "the pod CSV's eligible-pod count could not be read"
-_MISSING_REPORT = "the report was not written"
+_MISSING_REPORT = "the report was not produced by this run"
 
 
 def _material_missing(name: str, what: str) -> CheckResult:
@@ -920,7 +920,16 @@ def _run_pipeline(args, *, run_subprocess, input_version_dir: Path, records_dir:
         agg_argv += ["--distributed-scheduler", distributed]
     agg_exit = aggregate.run(agg_argv)
     if agg_exit != 0:
+        # The report and the figures are read back from disk, so their mere
+        # existence says nothing about whether *this* run wrote them: an
+        # earlier run's report.md and figures/*.png survive in --out, and
+        # judging the report's checks against them reported PASS for a report
+        # this run never produced (round2 review, correctness Must). A failed
+        # aggregation leaves no material at all, which run_all_checks reports
+        # as material missing (units/U05.md: "前の段が落ちて後の項目の材料が
+        # できないときは、後の項目を「材料が無い」として落とす").
         print(f"run_pilot: aggregate report command failed (exit code {agg_exit})", file=sys.stderr)
+        return _PipelineOutputs(summaries=summaries, records=records, report_text="", existing_figures=set())
 
     report_path = report_dir / "report.md"
     report_text = report_path.read_text(encoding="utf-8") if report_path.exists() else ""
