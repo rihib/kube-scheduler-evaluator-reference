@@ -361,7 +361,7 @@ def test_run_all_checks_reports_scenario2_material_missing_when_the_rho_1_1_leas
 
 def test_run_all_checks_reports_the_report_checks_as_material_missing_when_there_is_no_report() -> None:
     # units/U05.md: 前の段が落ちて後の項目の材料ができないときは、後の項目を
-    # 「材料が無い」として落とす. The nine checks that read the report
+    # 「材料が無い」として落とす. The ten checks that read the report
     # (scenarios 4, 5 and 6) must each be named and failed as material
     # missing, not silently dropped from the output and not judged against an
     # empty string as if the report had said nothing (round2 review, IMO 2).
