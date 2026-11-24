@@ -1153,6 +1153,37 @@ def test_run_has_buildinput_write_the_input_version_to_the_directory_the_argumen
     assert written == [str(input_dir / "rho-0.5.jsonl"), str(input_dir / "rho-1.1.jsonl")]
 
 
+def test_run_refuses_to_run_when_the_records_directory_already_holds_records(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # cmd/runpilot writes time-stamped file names, so a second run against the
+    # same --out used to leave 8 records behind: scenario 3 then failed with
+    # "expected 4 records, got 8" and the report mixed both runs' records
+    # (round1 review, correctness Must 5). Refusing up front keeps the earlier
+    # run's records intact and names the real problem, and every check is
+    # still reported (units/U05.md: "すべての項目を確かめ終えてから終わる").
+    out_dir = tmp_path / "out"
+    records_dir = out_dir / "records"
+    records_dir.mkdir(parents=True)
+    _write_record(records_dir / "earlier-run.jsonl", _good_combo_record(1.1, "LeastAllocated"))
+    earlier = (records_dir / "earlier-run.jsonl").read_text()
+    nodes_csv, pods_csv = _write_tiny_csvs(tmp_path)
+    calls: list[list[str]] = []
+
+    exit_code = run_pilot.run(
+        ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--ratio", "1.0", "--out", str(out_dir)],
+        run_subprocess=_recording_subprocess(_GOOD_BUILDINPUT_STDOUT, calls),
+    )
+
+    captured = capsys.readouterr()
+    assert calls == [], calls
+    assert list(records_dir.glob("*.jsonl")) == [records_dir / "earlier-run.jsonl"]
+    assert (records_dir / "earlier-run.jsonl").read_text() == earlier
+    assert str(records_dir) in captured.err
+    assert "scenario3: four records exist" in captured.out
+    assert exit_code == 1
+
+
 def test_the_default_output_directory_is_outside_the_repository() -> None:
     # units/U05.md: 既定では、このタスクの文書のフォルダの下に書く。Writing
     # inside the repository instead makes cmd/runpilot's own "git status
