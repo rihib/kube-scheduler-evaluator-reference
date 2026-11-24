@@ -1088,6 +1088,21 @@ def test_run_returns_zero_and_prints_only_pass_lines_when_every_check_passes(tmp
     assert exit_code == 0
 
 
+def test_the_default_output_directory_is_outside_the_repository() -> None:
+    # units/U05.md: 既定では、このタスクの文書のフォルダの下に書く。Writing
+    # inside the repository instead makes cmd/runpilot's own "git status
+    # --porcelain" see the untracked output folder and stamp every record's
+    # reference_commit with "-dirty", so the records lie about which tree
+    # they were produced from (round1 review, correctness Must 3).
+    repo_root = Path(run_pilot.__file__).resolve().parent.parent
+
+    default_out = run_pilot.DEFAULT_OUT_DIR.resolve()
+
+    assert not default_out.is_relative_to(repo_root), default_out
+    assert default_out.name == "pilot-run"
+    assert default_out.parent.name == "experiment1-pilot"
+
+
 # --- run (integration) ---
 
 _TINY_NODE_CSV = "sn,cpu_milli,memory_mib,gpu,model\nnode-1,4000,8192,0,\n"
