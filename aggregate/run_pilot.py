@@ -648,6 +648,11 @@ def _parse_args(argv: list[str]):
         default=str(DEFAULT_OUT_DIR),
         help="directory the input/, records/ and report/ subdirectories are written under",
     )
+    parser.add_argument(
+        "--input-version-dir",
+        default=None,
+        help="directory the input versions are written to, one JSON Lines file per rho (default: <out>/input)",
+    )
     return parser.parse_args(argv)
 
 
@@ -686,6 +691,7 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
     out_dir = Path(args.out)
     records_dir = out_dir / "records"
     report_dir = out_dir / "report"
+    input_version_dir = Path(args.input_version_dir) if args.input_version_dir else out_dir / "input"
 
     try:
         pods_text = Path(args.pods).read_text(encoding="utf-8")
@@ -711,6 +717,11 @@ def run(argv: list[str], *, run_subprocess=None) -> int:
                 str(rho),
                 "--ratio",
                 str(args.ratio),
+                # Keeps the version itself, not only its summary: without it
+                # nothing on disk says which input an experiment ran against
+                # (units/U05.md: "入力の版...の書き出し先は、引数で受け取る").
+                "--out",
+                str(input_version_dir / f"rho-{rho}.jsonl"),
             ]
         )
         if proc.returncode != 0:
