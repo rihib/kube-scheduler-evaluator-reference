@@ -466,6 +466,26 @@ def test_run_all_checks_flags_scenario2_time_order_when_transitions_are_out_of_o
     assert check.passed is False
 
 
+def test_run_all_checks_flags_scenario2_when_no_pod_was_ever_assigned_or_completed() -> None:
+    # units/U05.md scenario 2 asks that 配置と完了の遷移 carry a virtual time,
+    # which the time-order check alone cannot show: a record where nothing was
+    # ever placed has no such transition to order, so it passed vacuously
+    # (round1 review, correctness Must 2).
+    kwargs = _good_run_all_checks_kwargs()
+    records = kwargs["records"]
+    target = _find_record(records, 1.1, "LeastAllocated")
+    b = _Builder()
+    b.register_node(0, "node-1", {"cpu": "10"})
+    b.create_task(0, "task-1", "instance-1")  # created, but never bound and never completed
+    never_placed = aggregate.RunRecord(header=target.header, transitions=b.transitions)
+    kwargs["records"] = [r if r is not target else never_placed for r in records]
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    check = next(r for r in results if r.name == "scenario2: assign and complete transitions are recorded with a virtual time")
+    assert check.passed is False
+
+
 # --- scenario 3: four records ---
 
 
