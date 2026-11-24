@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -965,39 +966,44 @@ _GOOD_BUILDINPUT_STDOUT = {"0.5": _buildinput_stdout(1, 0.5), "1.1": _buildinput
 _FULLY_PASSING_BUILDINPUT_STDOUT = {"0.5": _buildinput_stdout(3, 0.5), "1.1": _buildinput_stdout(3, 1.1)}
 
 
-def _make_fake_subprocess(buildinput_stdout_by_rho: dict[str, str]):
+def _make_fake_subprocess(buildinput_stdout_by_rho: dict[str, str], records: Sequence[aggregate.RunRecord] = ()):
     """Builds a fake for run()'s run_subprocess: answers "go run ./cmd/buildinput"
     with a canned summary (so run() does not need a real openb CSV to parse
-    one from) and "go run ./cmd/runpilot" with success and no output, since
-    the test places the records cmd/runpilot would have written itself."""
+    one from) and "go run ./cmd/runpilot" by writing `records` into the
+    --out folder it was given, the way cmd/runpilot itself would."""
 
     def fake(args: list[str]) -> SimpleNamespace:
         if "./cmd/buildinput" in args:
             rho = args[args.index("--rho") + 1]
             return SimpleNamespace(returncode=0, stdout=buildinput_stdout_by_rho[rho], stderr="")
         if "./cmd/runpilot" in args:
+            records_dir = Path(args[args.index("--out") + 1])
+            records_dir.mkdir(parents=True, exist_ok=True)
+            for i, record in enumerate(records):
+                _write_record(records_dir / f"record-{i}.jsonl", record)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"unexpected run_subprocess call: {args}")
 
     return fake
 
 
+FOUR_GOOD_RECORDS = [
+    _good_combo_record(0.5, "LeastAllocated"),
+    _good_combo_record(0.5, "MostAllocated"),
+    _good_combo_record(1.1, "LeastAllocated"),
+    _good_combo_record(1.1, "MostAllocated"),
+]
+
+
 def test_run_prints_pass_and_fail_lines_and_returns_nonzero_when_some_checks_fail(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out_dir = tmp_path / "out"
-    records_dir = out_dir / "records"
-    records_dir.mkdir(parents=True)
-    # go run ./cmd/runpilot is faked to do nothing (see _fake_subprocess), so
-    # these four records stand in for what it would have written for the
-    # four (rho, scheduler) combinations.
-    for rho, scheduler in [(0.5, "LeastAllocated"), (0.5, "MostAllocated"), (1.1, "LeastAllocated"), (1.1, "MostAllocated")]:
-        _write_record(records_dir / f"rho{rho}-{scheduler}.jsonl", _good_combo_record(rho, scheduler))
-    nodes_csv, pods_csv = tmp_path / "nodes.csv", tmp_path / "openb_pod_list_test.csv"
-    nodes_csv.write_text("sn,cpu_milli,memory_mib,gpu,model\nnode-1,4000,8192,0,\n")
-    pods_csv.write_text(POD_CSV_HEADER + "pod-1,100,100,0,0,,BestEffort,Running,0,10,0\n")
+    # The fake stands in for go run ./cmd/runpilot by writing these four
+    # records for the four (rho, scheduler) combinations.
+    nodes_csv, pods_csv = _write_tiny_csvs(tmp_path)
 
     exit_code = run_pilot.run(
         ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--seed", "1", "--ratio", "1.0", "--out", str(out_dir)],
-        run_subprocess=_make_fake_subprocess(_GOOD_BUILDINPUT_STDOUT),
+        run_subprocess=_make_fake_subprocess(_GOOD_BUILDINPUT_STDOUT, FOUR_GOOD_RECORDS),
     )
 
     captured = capsys.readouterr()
@@ -1059,10 +1065,6 @@ def test_run_returns_zero_and_prints_only_pass_lines_when_every_check_passes(tmp
     ]
 
     out_dir = tmp_path / "out"
-    records_dir = out_dir / "records"
-    records_dir.mkdir(parents=True)
-    for i, r in enumerate(records):
-        _write_record(records_dir / f"record-{i}.jsonl", r)
     nodes_csv, pods_csv = tmp_path / "nodes.csv", tmp_path / "openb_pod_list_test.csv"
     nodes_csv.write_text("sn,cpu_milli,memory_mib,gpu,model\nnode-1,4000,8192,0,\n")
     # Every record above creates 4 pods (2 running + 1 large-pending + 1
@@ -1079,7 +1081,7 @@ def test_run_returns_zero_and_prints_only_pass_lines_when_every_check_passes(tmp
 
     exit_code = run_pilot.run(
         ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--seed", "1", "--ratio", "1.0", "--out", str(out_dir)],
-        run_subprocess=_make_fake_subprocess({"0.5": _buildinput_stdout(4, 0.5), "1.1": _buildinput_stdout(4, 1.1)}),
+        run_subprocess=_make_fake_subprocess({"0.5": _buildinput_stdout(4, 0.5), "1.1": _buildinput_stdout(4, 1.1)}, records),
     )
 
     captured = capsys.readouterr()
@@ -1091,19 +1093,13 @@ def test_run_returns_zero_and_prints_only_pass_lines_when_every_check_passes(tmp
 def _recording_subprocess(buildinput_stdout_by_rho: dict[str, str], calls: list[list[str]]):
     """_make_fake_subprocess, plus a record of every argument list it saw, so
     a test can assert what run() asked the Go commands to do."""
-    fake = _make_fake_subprocess(buildinput_stdout_by_rho)
+    fake = _make_fake_subprocess(buildinput_stdout_by_rho, FOUR_GOOD_RECORDS)
 
     def recording(args: list[str]):
         calls.append(args)
         return fake(args)
 
     return recording
-
-
-def _write_four_good_records(records_dir: Path) -> None:
-    records_dir.mkdir(parents=True, exist_ok=True)
-    for rho, scheduler in [(0.5, "LeastAllocated"), (0.5, "MostAllocated"), (1.1, "LeastAllocated"), (1.1, "MostAllocated")]:
-        _write_record(records_dir / f"rho{rho}-{scheduler}.jsonl", _good_combo_record(rho, scheduler))
 
 
 def _write_tiny_csvs(tmp_path: Path) -> tuple[Path, Path]:
@@ -1119,7 +1115,6 @@ def test_run_has_buildinput_write_each_input_version_under_the_output_directory(
     # only printed its summary — so which version an experiment ran against
     # was not recoverable afterwards (round1 review, correctness Must 4).
     out_dir = tmp_path / "out"
-    _write_four_good_records(out_dir / "records")
     nodes_csv, pods_csv = _write_tiny_csvs(tmp_path)
     calls: list[list[str]] = []
 
@@ -1135,7 +1130,6 @@ def test_run_has_buildinput_write_each_input_version_under_the_output_directory(
 def test_run_has_buildinput_write_the_input_version_to_the_directory_the_argument_names(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     input_dir = tmp_path / "elsewhere" / "versions"
-    _write_four_good_records(out_dir / "records")
     nodes_csv, pods_csv = _write_tiny_csvs(tmp_path)
     calls: list[list[str]] = []
 
