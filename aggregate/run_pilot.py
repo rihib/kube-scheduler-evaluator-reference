@@ -193,10 +193,17 @@ def _check_scenario4(report_text: str, *, existing_figures: set[str]) -> list[Ch
     report links to actually exists (units/U05.md's "確かめ方")."""
     rho_sections = re.split(r"(?m)^## ρ = ", report_text)[1:]
 
+    # The five metrics units/U05.md scenario 4 names, as the columns
+    # aggregate.py's _render_per_run_table writes them: クラスごとの待機時間
+    # is the nonzero_wait_fraction column (its per-class breakdown lives in
+    # the distribution figure, checked separately below), 配置されずに残った
+    # Podの数 is pending_count_at_end, and the remaining three are
+    # cluster_std, allocation_rate:<resource>, and unplaceable_free:<resource>.
     metrics_ok = bool(rho_sections) and all(
         "### 実行ごとのメトリクス" in s
         and "pending_count_at_end" in s
         and "cluster_std" in s
+        and "nonzero_wait_fraction" in s
         and "allocation_rate:" in s
         and "unplaceable_free:" in s
         for s in rho_sections
@@ -207,11 +214,29 @@ def _check_scenario4(report_text: str, *, existing_figures: set[str]) -> list[Ch
     missing_figures = referenced_figures - existing_figures
     figures_ok = not missing_figures
 
+    # The per-class wait times units/U05.md scenario 4 asks for appear only in
+    # the distribution figure, so a rho section that links to no figure has
+    # lost them — and "every referenced figure exists" above would pass
+    # vacuously for zero references.
+    sections_without_figure = [s.splitlines()[0] for s in rho_sections if not _FIGURE_REF_RE.search(s)]
+    section_figures_ok = bool(rho_sections) and not sections_without_figure
+
     return [
         CheckResult(
             name="scenario4: every rho section has the five-metric per-run table",
             passed=metrics_ok,
             detail="ok" if metrics_ok else "a rho section is missing the per-run metrics table or one of its columns",
+        ),
+        CheckResult(
+            name="scenario4: every rho section links to a wait-time distribution figure",
+            passed=section_figures_ok,
+            detail="ok"
+            if section_figures_ok
+            else (
+                f"rho section(s) with no figure reference: {sections_without_figure}"
+                if rho_sections
+                else "the report has no rho section at all"
+            ),
         ),
         CheckResult(
             name="scenario4: every rho section has a real scheduler diff",
