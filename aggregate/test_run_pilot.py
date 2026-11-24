@@ -1184,6 +1184,47 @@ def test_run_refuses_to_run_when_the_records_directory_already_holds_records(
     assert exit_code == 1
 
 
+# The pod CSV is the one input run() reads itself, and units/U05.md gives it
+# one contract either way: "コマンドは、すべての項目を確かめ終えてから終わる"
+# and "前の段が落ちて後の項目の材料ができないときは、後の項目を「材料が無い」
+# として落とす". A missing file used to return early with no item printed at
+# all, and a malformed one used to end in a traceback (round1 review,
+# correctness Must 6 and Must 7) — both must now report every item.
+
+
+@pytest.mark.parametrize(
+    ("case", "pods_csv_text"),
+    [
+        ("missing file", None),
+        ("no pod_phase column", "name,cpu_milli\npod-1,100\n"),
+        ("row with too few columns", POD_CSV_HEADER + "pod-1,100\n"),
+        ("unclosed quote", POD_CSV_HEADER + 'pod-1,100,100,0,0,,BestEffort,"Running,0,10,0\n'),
+    ],
+)
+def test_run_reports_every_check_when_the_pod_csv_cannot_be_counted(
+    case: str, pods_csv_text: str | None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out_dir = tmp_path / "out"
+    nodes_csv = tmp_path / "nodes.csv"
+    nodes_csv.write_text("sn,cpu_milli,memory_mib,gpu,model\nnode-1,4000,8192,0,\n")
+    pods_csv = tmp_path / "openb_pod_list_test.csv"
+    if pods_csv_text is not None:
+        pods_csv.write_text(pods_csv_text)
+
+    exit_code = run_pilot.run(
+        ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--ratio", "1.0", "--out", str(out_dir)],
+        run_subprocess=_make_fake_subprocess(_GOOD_BUILDINPUT_STDOUT, FOUR_GOOD_RECORDS),
+    )
+
+    captured = capsys.readouterr()
+    assert str(pods_csv) in captured.err, f"{case}: stderr does not name the pod CSV: {captured.err}"
+    # The checks that need the pod count say so, and the ones that do not
+    # still run: the report was still written, so scenario 4 is a real verdict.
+    assert "[FAIL] scenario1: used pods is 80% of non-pending pods: material missing" in captured.out, captured.out
+    assert "scenario4: every rho section has the five-metric per-run table" in captured.out, captured.out
+    assert exit_code == 1
+
+
 def test_the_default_output_directory_is_outside_the_repository() -> None:
     # units/U05.md: 既定では、このタスクの文書のフォルダの下に書く。Writing
     # inside the repository instead makes cmd/runpilot's own "git status

@@ -112,23 +112,52 @@ def _expected_sampled_count(eligible: int, ratio: float) -> int:
 
 _RHO_TOLERANCE = 1e-6
 
+# What a check reports when the earlier pipeline stage that should have
+# produced its input failed (units/U05.md: "前の段が落ちて後の項目の材料が
+# できないときは、後の項目を「材料が無い」として落とす"). Every such check is
+# a named failure, never an exception and never a silent skip, so the printed
+# output still carries one line per item.
+_MISSING_SUMMARY = "buildinput's summary for this rho was not produced"
+_MISSING_POD_COUNT = "the pod CSV's eligible-pod count could not be read"
+_MISSING_REPORT = "the report was not written"
 
-def _check_scenario1(summary: BuildInputSummary, *, eligible_pods: int, ratio: float, target_rho: float) -> list[CheckResult]:
+
+def _material_missing(name: str, what: str) -> CheckResult:
+    return CheckResult(name=name, passed=False, detail=f"material missing: {what}")
+
+
+def _as_material_missing(results: Sequence[CheckResult], what: str) -> list[CheckResult]:
+    """Relabels a group of checks as material-missing, keeping their names, so
+    the names stay written in one place (the check functions themselves)."""
+    return [_material_missing(r.name, what) for r in results]
+
+
+def _check_scenario1(summary: BuildInputSummary | None, *, eligible_pods: int | None, ratio: float, target_rho: float) -> list[CheckResult]:
     """spec.md scenario 1's Then: the used-pod count is the sampled 80% of
     non-Pending pods, and the achieved rho matches the target
     (units/U05.md's "確かめ方": "使った件数が...80%であること", "求めたρが
     1.1であること")."""
-    expected_used = _expected_sampled_count(eligible_pods, ratio)
-    used_ok = summary.used_pods == expected_used
-    rho_ok = abs(summary.rho_after - target_rho) <= _RHO_TOLERANCE
-    return [
-        CheckResult(
-            name="scenario1: used pods is 80% of non-pending pods",
+    used_name = "scenario1: used pods is 80% of non-pending pods"
+    rho_name = "scenario1: achieved rho matches the target"
+    if summary is None:
+        return [_material_missing(used_name, _MISSING_SUMMARY), _material_missing(rho_name, _MISSING_SUMMARY)]
+
+    if eligible_pods is None:
+        used_result = _material_missing(used_name, _MISSING_POD_COUNT)
+    else:
+        expected_used = _expected_sampled_count(eligible_pods, ratio)
+        used_ok = summary.used_pods == expected_used
+        used_result = CheckResult(
+            name=used_name,
             passed=used_ok,
             detail="ok" if used_ok else f"expected {expected_used} used pods ({eligible_pods} eligible x {ratio}), got {summary.used_pods}",
-        ),
+        )
+
+    rho_ok = abs(summary.rho_after - target_rho) <= _RHO_TOLERANCE
+    return [
+        used_result,
         CheckResult(
-            name="scenario1: achieved rho matches the target",
+            name=rho_name,
             passed=rho_ok,
             detail="ok" if rho_ok else f"expected rho (after) == {target_rho}, got {summary.rho_after}",
         ),
@@ -336,7 +365,7 @@ def _check_scenario6(report_text: str) -> list[CheckResult]:
     ]
 
 
-def _check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int, label: str) -> list[CheckResult]:
+def _check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int | None, label: str) -> list[CheckResult]:
     """units/U05.md's "数が合う": every used pod has a create_task transition,
     and at the end of observation every pod is either "completed" or
     "pending" (not stuck "running" or, since this pilot has no preemption,
@@ -352,18 +381,23 @@ def _check_sanity_counts(record: aggregate.RunRecord, *, expected_pod_count: int
     created = {
         t.component_id for t in record.transitions if t.operation == aggregate.OpCreateTask and t.state == aggregate.StateInstanceStatus
     }
-    count_ok = len(created) == expected_pod_count
+    count_name = f"sanity: created pod count matches the expected used-pod count ({label})"
+    if expected_pod_count is None:
+        count_result = _material_missing(count_name, _MISSING_POD_COUNT)
+    else:
+        count_ok = len(created) == expected_pod_count
+        count_result = CheckResult(
+            name=count_name,
+            passed=count_ok,
+            detail="ok" if count_ok else f"expected {expected_pod_count} created pods, found {len(created)}",
+        )
 
     statuses = aggregate.final_instance_statuses(record.transitions)
     bad = {instance_id: status for instance_id, status in statuses.items() if status not in ("completed", "pending")}
     final_ok = not bad
 
     return [
-        CheckResult(
-            name=f"sanity: created pod count matches the expected used-pod count ({label})",
-            passed=count_ok,
-            detail="ok" if count_ok else f"expected {expected_pod_count} created pods, found {len(created)}",
-        ),
+        count_result,
         CheckResult(
             name=f"sanity: every pod's final status is completed or pending ({label})",
             passed=final_ok,
@@ -464,13 +498,16 @@ def _check_sanity_rho_effect(metrics_low_rho: aggregate.Metrics, metrics_high_rh
     ]
 
 
-def _check_sanity_rho_achieved(summary: BuildInputSummary, *, target_rho: float) -> CheckResult:
+def _check_sanity_rho_achieved(summary: BuildInputSummary | None, *, target_rho: float) -> CheckResult:
     """units/U05.md's "負荷の効き方": the achieved rho (buildinput's "rho
     (after)") matches the target rho that run was built for. Reusable for
     both rho=0.5 and rho=1.1 (scenario 1's own check only covers rho=1.1)."""
+    name = f"sanity: rho={target_rho} achieved matches the target"
+    if summary is None:
+        return _material_missing(name, _MISSING_SUMMARY)
     ok = abs(summary.rho_after - target_rho) <= _RHO_TOLERANCE
     return CheckResult(
-        name=f"sanity: rho={target_rho} achieved matches the target",
+        name=name,
         passed=ok,
         detail="ok" if ok else f"expected rho (after) == {target_rho}, got {summary.rho_after}",
     )
@@ -511,9 +548,9 @@ def _check_sanity_scheduler_effect(
 
 def run_all_checks(
     *,
-    buildinput_summary_low_rho: BuildInputSummary,
-    buildinput_summary_high_rho: BuildInputSummary,
-    eligible_pods: int,
+    buildinput_summary_low_rho: BuildInputSummary | None,
+    buildinput_summary_high_rho: BuildInputSummary | None,
+    eligible_pods: int | None,
     ratio: float,
     records: Sequence[aggregate.RunRecord],
     report_text: str,
@@ -526,12 +563,14 @@ def run_all_checks(
     already-parsed content, never a path, so this function never touches
     disk and is fully exercised by small built, expected, and broken inputs.
 
-    When a check's input record is missing (the earlier pipeline stage that
-    should have produced it failed, or produced the wrong combination), that
-    check is reported as a single failed CheckResult naming what is missing,
-    instead of raising or being silently skipped (units/U05.md: "前の段が
-    落ちて後の項目の材料ができないときは、後の項目を「材料が無い」として
-    落とす")."""
+    When a check's input is missing (the earlier pipeline stage that should
+    have produced it failed, or produced the wrong combination), that check is
+    reported as a failed CheckResult naming what is missing, instead of
+    raising or being silently skipped (units/U05.md: "前の段が落ちて後の項目
+    の材料ができないときは、後の項目を「材料が無い」として落とす"). Hence the
+    optional arguments: None for a buildinput summary or the eligible-pod
+    count, and an empty report_text, each stand for "that stage produced
+    nothing", not for a zero."""
     results: list[CheckResult] = []
     results += _check_scenario1(buildinput_summary_high_rho, eligible_pods=eligible_pods, ratio=ratio, target_rho=aggregate.RHO_HIGH_LOAD)
     results.append(_check_sanity_rho_achieved(buildinput_summary_low_rho, target_rho=aggregate.RHO_NEGATIVE_CONTROL))
@@ -553,7 +592,7 @@ def run_all_checks(
         (aggregate.RHO_HIGH_LOAD, "LeastAllocated"),
         (aggregate.RHO_HIGH_LOAD, "MostAllocated"),
     ]
-    expected_pod_count = _expected_sampled_count(eligible_pods, ratio)
+    expected_pod_count = _expected_sampled_count(eligible_pods, ratio) if eligible_pods is not None else None
     metrics_by_combo: dict[tuple[float, str], aggregate.Metrics] = {}
     for rho, scheduler in combos:
         record = find(rho, scheduler)
@@ -585,9 +624,15 @@ def run_all_checks(
         )
 
     results += _check_scenario3(list(records))
-    results += _check_scenario4(report_text, existing_figures=existing_figures)
-    results += _check_scenario5(report_text)
-    results += _check_scenario6(report_text)
+
+    # Run the report checks even when there is no report, then relabel them:
+    # that keeps every check's name written once, in the check itself, so an
+    # unwritten report still prints one line per item rather than dropping
+    # the report's nine checks from the output.
+    report_results = (
+        _check_scenario4(report_text, existing_figures=existing_figures) + _check_scenario5(report_text) + _check_scenario6(report_text)
+    )
+    results += report_results if report_text.strip() else _as_material_missing(report_results, _MISSING_REPORT)
 
     for scheduler in ("LeastAllocated", "MostAllocated"):
         m_low = metrics_by_combo.get((aggregate.RHO_NEGATIVE_CONTROL, scheduler))
