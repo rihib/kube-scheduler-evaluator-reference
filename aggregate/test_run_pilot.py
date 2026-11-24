@@ -359,6 +359,25 @@ def test_run_all_checks_reports_scenario2_material_missing_when_the_rho_1_1_leas
         assert "material missing" in check.detail
 
 
+def test_run_all_checks_reports_the_report_checks_as_material_missing_when_there_is_no_report() -> None:
+    # units/U05.md: 前の段が落ちて後の項目の材料ができないときは、後の項目を
+    # 「材料が無い」として落とす. The nine checks that read the report
+    # (scenarios 4, 5 and 6) must each be named and failed as material
+    # missing, not silently dropped from the output and not judged against an
+    # empty string as if the report had said nothing (round2 review, IMO 2).
+    kwargs = _good_run_all_checks_kwargs()
+    kwargs["report_text"] = ""
+    kwargs["existing_figures"] = set()
+
+    results = run_pilot.run_all_checks(**kwargs)
+
+    report_checks = [r for r in results if r.name.startswith(("scenario4", "scenario5", "scenario6"))]
+    assert len(report_checks) == 10, [r.name for r in report_checks]
+    for check in report_checks:
+        assert check.passed is False, check
+        assert "material missing" in check.detail, check
+
+
 def test_run_all_checks_matches_records_whose_scheduler_profile_is_the_full_description() -> None:
     # scenarios/schedulerprofile.Pilot's description is not the bare string
     # "LeastAllocated"/"MostAllocated" cmd/runpilot's own records.go header
@@ -1254,6 +1273,56 @@ def test_run_refuses_to_run_when_the_records_directory_already_holds_records(tmp
     assert (records_dir / "earlier-run.jsonl").read_text() == earlier
     assert str(records_dir) in captured.err
     assert "scenario3: four records exist" in captured.out
+    assert exit_code == 1
+
+
+def _failing_runpilot_subprocess(buildinput_stdout_by_rho: dict[str, str]):
+    """A run_subprocess fake whose "go run ./cmd/runpilot" fails the way a
+    compile error or a panic in the Go command does: a non-zero exit code and
+    no record written."""
+
+    def fake(args: list[str]) -> SimpleNamespace:
+        if "./cmd/buildinput" in args:
+            rho = args[args.index("--rho") + 1]
+            return SimpleNamespace(returncode=0, stdout=buildinput_stdout_by_rho[rho], stderr="")
+        if "./cmd/runpilot" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="runpilot: build failed")
+        raise AssertionError(f"unexpected run_subprocess call: {args}")
+
+    return fake
+
+
+def test_run_does_not_judge_the_report_checks_against_an_earlier_runs_report(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # When cmd/runpilot fails there is no record, so aggregate.run writes no
+    # report and returns non-zero — but an earlier run's report/report.md and
+    # figures/*.png are still sitting in --out, and reading them back by mere
+    # existence made scenarios 4, 5 and 6 PASS against the old report
+    # (round2 review, correctness Must). units/U05.md wants the opposite:
+    # 前の段が落ちて後の項目の材料ができないときは、後の項目を「材料が無い」
+    # として落とす.
+    out_dir = tmp_path / "out"
+    report_dir = out_dir / "report"
+    (report_dir / "figures").mkdir(parents=True)
+    (report_dir / "report.md").write_text(GOOD_REPORT_TEXT, encoding="utf-8")
+    for name in ("rho-0.5-wait.png", "rho-1.1-wait.png"):
+        (report_dir / "figures" / name).write_bytes(b"an earlier run's figure")
+    nodes_csv, pods_csv = _write_tiny_csvs(tmp_path)
+
+    exit_code = run_pilot.run(
+        ["--nodes", str(nodes_csv), "--pods", str(pods_csv), "--ratio", "1.0", "--out", str(out_dir)],
+        run_subprocess=_failing_runpilot_subprocess(_GOOD_BUILDINPUT_STDOUT),
+    )
+
+    captured = capsys.readouterr()
+    # The failing stage is named on stderr (round2 review, IMO 1: this path
+    # had no test at all), and every report check is reported as material
+    # missing rather than as a verdict on the stale report.
+    assert "runpilot" in captured.err, captured.err
+    for line in captured.out.splitlines():
+        if line.startswith(("[PASS] scenario4", "[PASS] scenario5", "[PASS] scenario6")):
+            raise AssertionError(f"a report check passed against an earlier run's report: {line}")
+    assert "[FAIL] scenario4: every rho section has the five-metric per-run table: material missing" in captured.out, captured.out
+    assert "[FAIL] scenario4: every figure the report links to exists: material missing" in captured.out, captured.out
     assert exit_code == 1
 
 
