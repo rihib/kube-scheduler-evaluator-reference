@@ -36,6 +36,17 @@ import (
 // against the openb trace.
 const traceName = "openb"
 
+// schedulerProfile describes, for the transition record's header
+// (decisions.md: "スケジューラの情報は..."), the scheduler this command runs.
+// It is a constant rather than a flag because the command passes no
+// scheduler.Option (see run), so the only profile it can ever run is
+// kube-scheduler's default one: a flag could only make the header disagree
+// with what actually ran, and aggregate/aggregate.py groups runs by this
+// string to diff one scheduler against another. A command that runs a
+// specific profile (FGD, Tetris, ...) takes this description from the code
+// that configures that profile.
+const schedulerProfile = "default kube-scheduler profile"
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stderr, nil, nil))
 }
@@ -62,7 +73,6 @@ func run(
 	targetRho := fs.Float64("rho", 1.0, "target rho the submission intervals are scaled to reach")
 	iterations := fs.Int("iterations", 1, "number of times to repeat the run")
 	outDir := fs.String("out", "records", "directory each run's transition record is written to")
-	schedulerProfile := fs.String("scheduler-profile", "default kube-scheduler profile", "description of the scheduler profile this run uses, recorded in the header")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -126,7 +136,7 @@ func run(
 		ReferenceCommit:  refCommit,
 		InputSeed:        strconv.FormatInt(*seed, 10),
 		Rho:              *targetRho,
-		SchedulerProfile: *schedulerProfile,
+		SchedulerProfile: schedulerProfile,
 	}
 
 	// evaluator.WithRecordWriterFactory takes priority over
