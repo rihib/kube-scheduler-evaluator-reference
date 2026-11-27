@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -228,6 +229,32 @@ func TestRun_FailsWhenIterationsLessThanOne(t *testing.T) {
 	}
 	if len(store.runs) != 0 {
 		t.Errorf("run count = %d, want 0", len(store.runs))
+	}
+}
+
+// reference のコミットを取れなければ、何も実行せずに失敗する。コミットを
+// 名乗れないまま記録を書くと、どのツリーが動いたのか分からない記録ができる
+// ためである。
+func TestRun_FailsWhenReferenceCommitCannotBeObtained(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", runTestNodesCSV)
+	podsPath := writeTempCSV(t, runTestPodsFile, runTestPodsCSV)
+	store := &fakeRecordStore{}
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+	}, &stderr, store.factory, func() (string, error) {
+		return "", errors.New("git is unavailable")
+	})
+	if code == 0 {
+		t.Fatalf("exit code = 0, want nonzero")
+	}
+	if len(store.runs) != 0 {
+		t.Errorf("run count = %d, want 0", len(store.runs))
+	}
+	if !strings.Contains(stderr.String(), "git is unavailable") {
+		t.Errorf("stderr = %q, want it to carry the provider's error", stderr.String())
 	}
 }
 
