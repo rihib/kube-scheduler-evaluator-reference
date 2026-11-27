@@ -101,7 +101,7 @@ func writeTempCSV(t *testing.T, name, content string) string {
 }
 
 // fakeRecordStore stands in for where runs' records are written
-// (units/U03.md: "記録の書き出し先と reference のコミットに Fake を渡す")。
+// (experiment1-pilot's units/U03.md: "記録の書き出し先と reference のコミットに Fake を渡す")。
 // It keeps each run's header (its first WriteLine call) as parsed JSON and
 // counts the transitions written after it.
 type fakeRecordStore struct {

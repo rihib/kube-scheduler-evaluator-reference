@@ -1,5 +1,5 @@
 // Command run builds one openb input version and runs it through the
-// evaluator, writing a transition record (units/U03.md) whose header
+// evaluator, writing a transition record (experiment1-pilot's units/U03.md) whose header
 // identifies the input version and scheduler profile that produced it.
 // It is the common part of "実行をまとめて動かす部分" (units/U01.md): building
 // one input version, running the default kube-scheduler profile against it
@@ -56,7 +56,7 @@ func main() {
 // input version from the openb CSVs, and runs it the requested number of
 // iterations. recordWriterFactory and referenceCommitProvider are injected
 // so tests can pass Fakes for where the record is written and for
-// reference's own commit (units/U03.md Implementation Decisions: "コマンドの
+// reference's own commit (experiment1-pilot's units/U03.md Implementation Decisions: "コマンドの
 // アダプターは、記録の書き出し先と、reference のコミットを取るものを外から
 // 受け取る"); nil selects their real implementations.
 func run(

@@ -100,8 +100,8 @@ func TestRun_WritesRecordAggregateCanTurnIntoReport(t *testing.T) {
 	}
 
 	// aggregate.py は PEP723 のインラインスクリプトなので、uv が依存を解決
-	// して流す（testing.md「Python は ... uv run で流す」）。uv が無ければ
-	// この境目の検査が静かに消えるので、飛ばさずに落とす。
+	// して流す。uv が無ければこの境目の検査が静かに消えるので、飛ばさずに
+	// 落とす。
 	aggregate, err := filepath.Abs(filepath.Join("..", "..", "aggregate", "aggregate.py"))
 	if err != nil {
 		t.Fatalf("failed to resolve aggregate.py's path: %v", err)
