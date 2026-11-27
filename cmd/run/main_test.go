@@ -219,6 +219,33 @@ func TestRun_FailsWhenIterationsLessThanOne(t *testing.T) {
 	}
 }
 
+// --rho が有限な数でなければ、何も実行せずに失敗する。+Inf は
+// clusterdata.BuildInputVersion の検証（NaN と 0 以下だけを弾く）を素通りし、
+// scenarioID が作る "rho+Inf" が definition.NewScenario の ID の制約
+// （^[a-zA-Z][a-zA-Z0-9-]*$）に外れて panic するためである。
+func TestRun_FailsWhenRhoIsNotFinite(t *testing.T) {
+	for _, rho := range []string{"+Inf", "-Inf", "NaN"} {
+		t.Run(rho, func(t *testing.T) {
+			nodesPath := writeTempCSV(t, "nodes.csv", runTestNodesCSV)
+			podsPath := writeTempCSV(t, runTestPodsFile, runTestPodsCSV)
+			store := &fakeRecordStore{}
+
+			var stderr bytes.Buffer
+			code := run([]string{
+				"--nodes=" + nodesPath,
+				"--pods=" + podsPath,
+				"--rho=" + rho,
+			}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
+			if code != 2 {
+				t.Errorf("exit code = %d, want 2 (stderr: %s)", code, stderr.String())
+			}
+			if len(store.runs) != 0 {
+				t.Errorf("run count = %d, want 0", len(store.runs))
+			}
+		})
+	}
+}
+
 // pods CSV のファイル名が openb で始まらなければ、記録のヘッダが実際と
 // 違うトレースを名乗ってしまうので、実行せずに失敗する。
 func TestRun_FailsWhenPodsFileDoesNotStartWithTraceName(t *testing.T) {
