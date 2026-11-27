@@ -142,6 +142,27 @@ func TestRun_FailsWhenPodsPathDoesNotExist(t *testing.T) {
 	}
 }
 
+// ノードの CSV のパスが存在しないときも、終了コードが0でなく、記録のファイルは
+// 1つもできない。
+func TestRun_FailsWhenNodesPathDoesNotExist(t *testing.T) {
+	podsPath := writeTempCSV(t, runTestPodsFile, runTestPodsCSV)
+	outDir := t.TempDir()
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=/no/such/file.csv",
+		"--pods=" + podsPath,
+		"--out=" + outDir,
+	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
+	if code == 0 {
+		t.Fatalf("exit code = 0, want nonzero")
+	}
+	entries, err := os.ReadDir(outDir)
+	if err == nil && len(entries) != 0 {
+		t.Errorf("record files = %v, want none", entries)
+	}
+}
+
 // initTempGitRepo creates a git repository with one commit in a temporary
 // directory, makes it the test's working directory, and returns that commit.
 // referenceCommit() asks git about the working directory it runs in, so the

@@ -2,7 +2,6 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #   "numpy",
-#   "pandas",
 # ]
 # ///
 """Aggregates kube-scheduler-evaluator transition records into a run's
