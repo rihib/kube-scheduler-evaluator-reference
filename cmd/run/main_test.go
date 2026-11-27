@@ -148,8 +148,11 @@ func (w *fakeRecordWriter) Close() error { return nil }
 
 // run(--iterations=3) は、反復の回数だけ記録の実行ができ、どの実行の
 // 1行目にも input.trace_name・input.trace_version・input.input_seed・
-// input.rho・input.reference_commit が正しく入り、どの実行も遷移を
-// 1件以上記録する。
+// input.rho・input.reference_commit と、動かしたスケジューラを指す
+// scheduler.profile が正しく入り、どの実行も遷移を1件以上記録する。
+// scheduler.profile は、集計（aggregate/aggregate.py の _diffs_for_group と
+// build_rho_sections）がスケジューラを区別する鍵なので、書き違えると落ちずに
+// 誤った集計になる。
 func TestRun_WritesOneRunPerIteration(t *testing.T) {
 	nodesPath := writeTempCSV(t, "nodes.csv", runTestNodesCSV)
 	podsPath := writeTempCSV(t, runTestPodsFile, runTestPodsCSV)
@@ -192,6 +195,15 @@ func TestRun_WritesOneRunPerIteration(t *testing.T) {
 		}
 		if got, _ := input["rho"].(float64); got != 0.5 {
 			t.Errorf("input.rho = %v, want 0.5", got)
+		}
+		sched, _ := r.header["scheduler"].(map[string]any)
+		if sched == nil {
+			t.Fatalf("header is missing scheduler: %v", r.header)
+		}
+		// このコマンドは scheduler.Option を渡さないので、動くのは既定の
+		// kube-scheduler のプロファイルだけである。
+		if got, _ := sched["profile"].(string); got != "default kube-scheduler profile" {
+			t.Errorf("scheduler.profile = %q, want %q", got, "default kube-scheduler profile")
 		}
 		if r.transitionLines == 0 {
 			t.Errorf("run with header %v recorded no transitions", r.header)
