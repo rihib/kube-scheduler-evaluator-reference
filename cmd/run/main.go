@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,6 +64,16 @@ func run(
 	outDir := fs.String("out", "records", "directory each run's transition record is written to")
 	schedulerProfile := fs.String("scheduler-profile", "default kube-scheduler profile", "description of the scheduler profile this run uses, recorded in the header")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	// ±Inf and NaN are rejected even though strconv.ParseFloat (which the
+	// flag package uses) accepts them: clusterdata.BuildInputVersion only
+	// rejects NaN and non-positive values, so +Inf would reach
+	// definition.NewScenario by way of scenarioID and make it panic on an ID
+	// containing "+Inf".
+	if math.IsNaN(*targetRho) || math.IsInf(*targetRho, 0) {
+		fmt.Fprintf(stderr, "run: --rho must be a finite number, got %v\n", *targetRho)
 		return 2
 	}
 
