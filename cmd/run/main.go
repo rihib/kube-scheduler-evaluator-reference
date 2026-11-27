@@ -1,12 +1,18 @@
-// Command runpilot runs experiment1's pilot (spec.md scenario 3): one openb
-// input version, against every combination of target rho and scheduler
-// profile, each run the requested number of times. Each run writes its own
-// transition record (units/U03.md), whose header line identifies the
-// combination it belongs to.
+// Command run builds one openb input version and runs it through the
+// evaluator, writing a transition record (experiment1-pilot's units/U03.md) whose header
+// identifies the input version and scheduler profile that produced it.
+// It is the common part of "実行をまとめて動かす部分" (units/U01.md): building
+// one input version, running the default kube-scheduler profile against it
+// the requested number of iterations, and writing each run's record.
+//
+// A new experiment that needs to run a specific scheduler profile (FGD,
+// Tetris, ...) or compare several of them replaces this command with its own
+// (units/U01.md "ρ の定義、クラスタの縮め方、GPU の表し方を変えるのは、後の
+// 単位で行う" — likewise for which scheduler(s) to run); this command only
+// keeps the plumbing every such command needs working.
 package main
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -21,67 +27,80 @@ import (
 
 	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/clusterdata"
 	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/consts"
-	"github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/schedulerprofile"
 	"github.com/pfnet/kube-scheduler-evaluator/cmd/evaluator"
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
-	"k8s.io/kubernetes/pkg/scheduler"
-	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
 )
 
 // traceName identifies the input trace in the transition record's header
-// (decisions.md: "入力の情報は、トレースの名前と版..."). This pilot only runs
-// against the openb trace.
+// (experiment1-pilot's units/U03.md: "入力の情報は、トレースの名前と版、変換
+// 規則の版（reference のコミット）、入力の版のシード、ρ である"). This
+// command only runs against the openb trace.
 const traceName = "openb"
+
+// schedulerProfile describes, for the transition record's header
+// (experiment1-pilot's units/U03.md: "スケジューラの情報は、profile の設定で
+// ある"), the scheduler this command runs. It is a constant rather than a
+// flag because the command passes no scheduler.Option (see run), so the only
+// profile it can ever run is kube-scheduler's default one: a flag could only
+// make the header disagree with what actually ran, and aggregate/aggregate.py
+// groups runs by this string to diff one scheduler against another. A command
+// that runs a specific profile (FGD, Tetris, ...) takes this description from
+// the code that configures that profile.
+const schedulerProfile = "default kube-scheduler profile"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stderr, nil, nil))
 }
 
 // run parses args in the same shape as the real command line, builds one
-// input version per target rho from the openb CSVs, and runs it against both
-// scheduler profiles the requested number of iterations. recordWriterFactory
-// and referenceCommitProvider are injected so tests can pass Fakes for where
-// the record is written and for reference's own commit (units/U03.md
-// Implementation Decisions: "コマンドのアダプターは、記録の書き出し先と、
-// reference のコミットを取るものを外から受け取る"); nil selects their real
-// implementations.
+// input version from the openb CSVs, and runs it the requested number of
+// iterations. recordWriterFactory and referenceCommitProvider are injected
+// so tests can pass Fakes for where the record is written and for
+// reference's own commit (experiment1-pilot's units/U03.md Implementation Decisions: "コマンドの
+// アダプターは、記録の書き出し先と、reference のコミットを取るものを外から
+// 受け取る"); nil selects their real implementations.
 func run(
 	args []string, stderr io.Writer,
 	recordWriterFactory evaluator.RecordWriterFactory,
 	referenceCommitProvider func() (string, error),
 ) int {
-	fs := flag.NewFlagSet("runpilot", flag.ContinueOnError)
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
 	nodesPath := fs.String("nodes", ".cache/clusterdata/openb_node_list_all_node.csv", "openb node list CSV")
 	podsPath := fs.String("pods", ".cache/clusterdata/openb_pod_list_default.csv", "openb pod list CSV")
 	seed := fs.Int64("seed", 1, "seed for sampling and ordering pods")
 	sampleRatio := fs.Float64("ratio", 0.8, "fraction of non-Pending pods to keep")
-	rhosFlag := fs.String("rhos", "0.5,1.1", "comma-separated target rho values to run, one input version each")
-	iterations := fs.Int("iterations", 1, "number of times to repeat each rho x scheduler profile combination")
+	targetRho := fs.Float64("rho", 1.0, "target rho the submission intervals are scaled to reach")
+	iterations := fs.Int("iterations", 1, "number of times to repeat the run")
 	outDir := fs.String("out", "records", "directory each run's transition record is written to")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	rhos, err := parseRhos(*rhosFlag)
-	if err != nil {
-		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+	// ±Inf and NaN are rejected even though strconv.ParseFloat (which the
+	// flag package uses) accepts them: clusterdata.BuildInputVersion only
+	// rejects NaN and non-positive values, so +Inf would reach
+	// definition.NewScenario by way of scenarioID and make it panic on an ID
+	// containing "+Inf".
+	if math.IsNaN(*targetRho) || math.IsInf(*targetRho, 0) {
+		fmt.Fprintf(stderr, "run: --rho must be a finite number, got %v\n", *targetRho)
 		return 2
 	}
+
 	if *iterations < 1 {
-		fmt.Fprintf(stderr, "runpilot: --iterations must be at least 1, got %d\n", *iterations)
+		fmt.Fprintf(stderr, "run: --iterations must be at least 1, got %d\n", *iterations)
 		return 2
 	}
 
 	nodesCSV, err := os.ReadFile(*nodesPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		fmt.Fprintf(stderr, "run: %v\n", err)
 		return 1
 	}
 	podsCSV, err := os.ReadFile(*podsPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		fmt.Fprintf(stderr, "run: %v\n", err)
 		return 1
 	}
 
@@ -91,30 +110,34 @@ func run(
 	}
 	refCommit, err := commitProvider()
 	if err != nil {
-		fmt.Fprintf(stderr, "runpilot: failed to get reference commit: %v\n", err)
+		fmt.Fprintf(stderr, "run: failed to get reference commit: %v\n", err)
 		return 1
 	}
 	// The pods CSV's file name (minus extension) is treated as the trace's
 	// version (e.g. "openb_pod_list_default"), so it must name the openb
-	// trace this pilot only supports; a CSV from another trace would
+	// trace this command only supports; a CSV from another trace would
 	// otherwise make the record's header lie about which trace it ran.
 	traceVersion := strings.TrimSuffix(filepath.Base(*podsPath), ".csv")
 	if !strings.HasPrefix(traceVersion, traceName) {
-		fmt.Fprintf(stderr, "runpilot: --pods file name %q does not start with the %s trace name; this pilot only supports the %s trace\n", traceVersion, traceName, traceName)
+		fmt.Fprintf(stderr, "run: --pods file name %q does not start with the %s trace name; this command only supports the %s trace\n", traceVersion, traceName, traceName)
 		return 2
 	}
 
-	scenarios, err := pilotScenarios(nodesCSV, podsCSV, pilotOptions{
-		Seed:            *seed,
-		SampleRatio:     *sampleRatio,
-		Rhos:            rhos,
-		Iterations:      *iterations,
-		TraceVersion:    traceVersion,
-		ReferenceCommit: refCommit,
-	})
+	events, _, err := clusterdata.BuildInputVersion(
+		strings.NewReader(string(nodesCSV)), strings.NewReader(string(podsCSV)), *seed, *targetRho, *sampleRatio,
+	)
 	if err != nil {
-		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		fmt.Fprintf(stderr, "run: %v\n", err)
 		return 1
+	}
+
+	identity := definition.RunIdentity{
+		TraceName:        traceName,
+		TraceVersion:     traceVersion,
+		ReferenceCommit:  refCommit,
+		InputSeed:        strconv.FormatInt(*seed, 10),
+		Rho:              *targetRho,
+		SchedulerProfile: schedulerProfile,
 	}
 
 	// evaluator.WithRecordWriterFactory takes priority over
@@ -134,61 +157,18 @@ func run(
 			cfgOpts...,
 		),
 		evaluator.WithMetricStores(),
-		scenarios...,
+		// No scheduler.Option is passed, so the scenario runs the default
+		// kube-scheduler profile; a command that needs a specific profile
+		// (FGD, Tetris, ...) builds its own scenario with scheduler.WithProfiles
+		// instead of this one (units/U01.md).
+		evaluator.WithScenario(scenarioID(*targetRho), *iterations, eventsGenerator(events), nil, identity),
 	)
 	if err != nil {
-		fmt.Fprintf(stderr, "runpilot: %v\n", err)
+		fmt.Fprintf(stderr, "run: %v\n", err)
 		return 1
 	}
 
 	return eval.Run(context.Background())
-}
-
-// pilotOptions groups the flag values pilotScenarios needs, instead of
-// taking them as separate parameters (several of which share a type and so
-// could otherwise be swapped at a call site without a compile error).
-type pilotOptions struct {
-	Seed            int64
-	SampleRatio     float64
-	Rhos            []float64
-	Iterations      int
-	TraceVersion    string
-	ReferenceCommit string
-}
-
-// pilotScenarios builds one definition.Scenario per (rho, profile) pair: the
-// input version for rho is built once (units/U03.md: "U02 で作った入力の版を、
-// そのまま evaluator のシナリオとして使う") and its events are reused by both
-// profiles' scenarios, since a scenario's generator only reads the slice.
-func pilotScenarios(nodesCSV, podsCSV []byte, opts pilotOptions) ([]definition.Scenario, error) {
-	var scenarios []definition.Scenario
-	for _, rho := range opts.Rhos {
-		events, _, err := clusterdata.BuildInputVersion(
-			bytes.NewReader(nodesCSV), bytes.NewReader(podsCSV), opts.Seed, rho, opts.SampleRatio,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for _, strategy := range schedulerprofile.Strategies {
-			profile, description, err := schedulerprofile.Pilot(strategy)
-			if err != nil {
-				return nil, err
-			}
-			identity := definition.RunIdentity{
-				TraceName:        traceName,
-				TraceVersion:     opts.TraceVersion,
-				ReferenceCommit:  opts.ReferenceCommit,
-				InputSeed:        strconv.FormatInt(opts.Seed, 10),
-				Rho:              rho,
-				SchedulerProfile: description,
-			}
-			scenarios = append(scenarios, evaluator.WithScenario(
-				scenarioID(rho, strategy), opts.Iterations, eventsGenerator(events), nil, identity,
-				scheduler.WithProfiles(profile),
-			))
-		}
-	}
-	return scenarios, nil
 }
 
 // eventsGenerator adapts a precomputed event slice (clusterdata.BuildInputVersion's
@@ -201,43 +181,15 @@ func eventsGenerator(events []definition.Event) func(chan<- definition.Event) {
 	}
 }
 
-// parseRhos splits a comma-separated list of target rho values. ±Inf and NaN
-// are rejected even though strconv.ParseFloat accepts them: clusterdata.BuildInputVersion
-// only rejects NaN and non-positive values, so +Inf would reach
-// definition.NewScenario by way of scenarioID and make it panic on an ID
-// containing "+Inf".
-func parseRhos(s string) ([]float64, error) {
-	parts := strings.Split(s, ",")
-	rhos := make([]float64, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		v, err := strconv.ParseFloat(part, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid --rhos value %q: %w", part, err)
-		}
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, fmt.Errorf("--rhos value %q must be a finite number", part)
-		}
-		rhos = append(rhos, v)
-	}
-	if len(rhos) == 0 {
-		return nil, fmt.Errorf("--rhos must list at least one value, got %q", s)
-	}
-	return rhos, nil
-}
-
-// scenarioID builds a scenario ID unique to one (rho, profile) combination.
+// scenarioID builds a scenario ID unique to one target rho.
 // definition.NewScenario requires an ID matching ^[a-zA-Z][a-zA-Z0-9-]*$, so
 // rho's decimal point is replaced with "p" (and a leading minus, which rho
 // never has in practice, with "neg" so the id still starts with a letter).
-func scenarioID(rho float64, strategy schedulerconfig.ScoringStrategyType) string {
+func scenarioID(rho float64) string {
 	rhoLabel := strconv.FormatFloat(rho, 'f', -1, 64)
 	rhoLabel = strings.ReplaceAll(rhoLabel, "-", "neg")
 	rhoLabel = strings.ReplaceAll(rhoLabel, ".", "p")
-	return fmt.Sprintf("rho%s-%s", rhoLabel, strings.ToLower(string(strategy)))
+	return fmt.Sprintf("rho%s", rhoLabel)
 }
 
 // referenceCommitFrom reports reference's own commit out of one build
@@ -270,7 +222,7 @@ func referenceCommitFrom(info *debug.BuildInfo) (commit string, found bool) {
 // for whether the working tree is dirty, in which case "-dirty" is appended
 // just as referenceCommitFrom does for a dirty build. Git is asked whenever
 // build info carries no vcs.revision, which is the normal case for how this
-// pilot is run ("go run ./cmd/runpilot": only passing a package path to "go
+// command is run ("go run ./cmd/run": only passing a package path to "go
 // build" embeds vcs information), so this is the path that usually decides
 // whether the record's header names a dirty tree.
 func referenceCommitFromGit(revParseOut, statusOut string) string {
@@ -285,8 +237,8 @@ func referenceCommitFromGit(revParseOut, statusOut string) string {
 // record.EvaluatorCommit does for the evaluator module: build info's
 // vcs.revision when available, falling back to asking git directly when it
 // is not. Only passing a package path to "go build" embeds vcs information,
-// so the git fallback is the path this pilot takes when run the normal way,
-// with "go run ./cmd/runpilot"; a "go test" binary of this package takes it
+// so the git fallback is the path this command takes when run the normal
+// way, with "go run ./cmd/run"; a "go test" binary of this package takes it
 // too.
 func referenceCommit() (string, error) {
 	if info, ok := debug.ReadBuildInfo(); ok {

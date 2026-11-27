@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,21 +12,17 @@ import (
 	"testing"
 )
 
-// pilotTestNodesCSV, pilotTestPodsFile and pilotTestPodsCSV are also defined,
-// identically, in main_test.go: that file has no build tag, so it is
-// compiled together with this one whenever -tags integration is passed, and
-// redeclaring them here would be a build error. The same goes for
-// writeTempCSV and profileLabel.
+// runTestNodesCSV, runTestPodsFile, runTestPodsCSV and writeTempCSV are also
+// defined, identically, in main_test.go: that file has no build tag, so it
+// is compiled together with this one whenever -tags integration is passed,
+// and redeclaring them here would be a build error.
 
-// recordHeader is the subset of the transition record's header line (units/U01.md)
-// this test needs to tell runs apart.
+// recordHeader is the subset of the transition record's header line
+// (units/U01.md) this test needs.
 type recordHeader struct {
 	Input struct {
 		Rho float64 `json:"rho"`
 	} `json:"input"`
-	Scheduler struct {
-		Profile string `json:"profile"`
-	} `json:"scheduler"`
 }
 
 func readHeader(t *testing.T, path string) recordHeader {
@@ -44,12 +39,11 @@ func readHeader(t *testing.T, path string) recordHeader {
 	return h
 }
 
-// 予備実験の4回の実行（spec.md シナリオ3: ρ 0.5/1.1 x LeastAllocated/MostAllocated）を
-// まとめて動かすと、組ごとに記録のファイルが1つずつでき、1行目の rho と
-// scheduler.profile で、どの組の実行かが区別できる。
-func TestRun_WritesOneRecordFilePerCombo(t *testing.T) {
-	nodesPath := writeTempCSV(t, "nodes.csv", pilotTestNodesCSV)
-	podsPath := writeTempCSV(t, pilotTestPodsFile, pilotTestPodsCSV)
+// 本物の記録の出力先（一時フォルダ）に向けて動かすと、記録のファイルが1つ
+// できて、1行目の input.rho が指定した値になっている。
+func TestRun_WritesOneRecordFileToRealOutputDir(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", runTestNodesCSV)
+	podsPath := writeTempCSV(t, runTestPodsFile, runTestPodsCSV)
 	outDir := t.TempDir()
 
 	var stderr bytes.Buffer
@@ -58,7 +52,7 @@ func TestRun_WritesOneRecordFilePerCombo(t *testing.T) {
 		"--pods=" + podsPath,
 		"--seed=1",
 		"--ratio=1.0",
-		"--rhos=0.5,1.1",
+		"--rho=0.5",
 		"--iterations=1",
 		"--out=" + outDir,
 	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
@@ -70,40 +64,94 @@ func TestRun_WritesOneRecordFilePerCombo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read output dir: %v", err)
 	}
-	if len(entries) != 4 {
-		t.Fatalf("record file count = %d, want 4: %v", len(entries), entries)
+	if len(entries) != 1 {
+		t.Fatalf("record file count = %d, want 1: %v", len(entries), entries)
+	}
+	h := readHeader(t, filepath.Join(outDir, entries[0].Name()))
+	if h.Input.Rho != 0.5 {
+		t.Errorf("input.rho = %v, want 0.5", h.Input.Rho)
+	}
+}
+
+// このコマンドが書いた記録を、集計のコマンド（aggregate/aggregate.py）が
+// そのまま読んで報告にできる。記録を書く側と読む側は別の言語なので、ヘッダの
+// 項目の名前（aggregate.py の parse_record が必須で読む input.*・execution.*・
+// scheduler.profile）が食い違っても、どちらかのテストだけでは落ちない。報告に
+// 動かした ρ の節ができることまで確かめ、ヘッダの値が読み側に届いていることを
+// 見る。
+func TestRun_WritesRecordAggregateCanTurnIntoReport(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", runTestNodesCSV)
+	podsPath := writeTempCSV(t, runTestPodsFile, runTestPodsCSV)
+	recordsDir := t.TempDir()
+	reportDir := t.TempDir()
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+		"--seed=1",
+		"--ratio=1.0",
+		"--rho=0.5",
+		"--iterations=1",
+		"--out=" + recordsDir,
+	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
 
-	wantCombos := map[string]bool{
-		"0.5-LeastAllocated": false, "0.5-MostAllocated": false,
-		"1.1-LeastAllocated": false, "1.1-MostAllocated": false,
+	// aggregate.py は PEP723 のインラインスクリプトなので、uv が依存を解決
+	// して流す。uv が無ければこの境目の検査が静かに消えるので、飛ばさずに
+	// 落とす。
+	aggregate, err := filepath.Abs(filepath.Join("..", "..", "aggregate", "aggregate.py"))
+	if err != nil {
+		t.Fatalf("failed to resolve aggregate.py's path: %v", err)
 	}
-	for _, e := range entries {
-		h := readHeader(t, filepath.Join(outDir, e.Name()))
-		key := fmt.Sprintf("%v-%s", h.Input.Rho, profileLabel(t, h.Scheduler.Profile))
-		if _, ok := wantCombos[key]; !ok {
-			t.Errorf("record file %s has unexpected combo %s", e.Name(), key)
-			continue
-		}
-		wantCombos[key] = true
+	cmd := exec.Command("uv", "run", aggregate,
+		"--records-dir="+recordsDir, "--output-dir="+reportDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("aggregate.py could not read the record this command wrote: %v (output: %s)", err, out)
 	}
-	for combo, seen := range wantCombos {
-		if !seen {
-			t.Errorf("no record file found for combo %s", combo)
-		}
+
+	report, err := os.ReadFile(filepath.Join(reportDir, "report.md"))
+	if err != nil {
+		t.Fatalf("failed to read the report aggregate.py wrote: %v", err)
+	}
+	if !strings.Contains(string(report), "ρ = 0.5") {
+		t.Errorf("report has no section for the ρ this command ran:\n%s", report)
 	}
 }
 
 // Pod の CSV のパスが存在しないときは、終了コードが0でなく、記録のファイルは
 // 1つもできない。
 func TestRun_FailsWhenPodsPathDoesNotExist(t *testing.T) {
-	nodesPath := writeTempCSV(t, "nodes.csv", pilotTestNodesCSV)
+	nodesPath := writeTempCSV(t, "nodes.csv", runTestNodesCSV)
 	outDir := t.TempDir()
 
 	var stderr bytes.Buffer
 	code := run([]string{
 		"--nodes=" + nodesPath,
 		"--pods=/no/such/file.csv",
+		"--out=" + outDir,
+	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
+	if code == 0 {
+		t.Fatalf("exit code = 0, want nonzero")
+	}
+	entries, err := os.ReadDir(outDir)
+	if err == nil && len(entries) != 0 {
+		t.Errorf("record files = %v, want none", entries)
+	}
+}
+
+// ノードの CSV のパスが存在しないときも、終了コードが0でなく、記録のファイルは
+// 1つもできない。
+func TestRun_FailsWhenNodesPathDoesNotExist(t *testing.T) {
+	podsPath := writeTempCSV(t, runTestPodsFile, runTestPodsCSV)
+	outDir := t.TempDir()
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=/no/such/file.csv",
+		"--pods=" + podsPath,
 		"--out=" + outDir,
 	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
 	if code == 0 {
@@ -129,14 +177,14 @@ func initTempGitRepo(t *testing.T) (dir, headCommit string) {
 	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("first\n"), 0o644); err != nil {
 		t.Fatalf("failed to write tracked.txt: %v", err)
 	}
-	// user.name/user.email and commit.gpgsign are passed per command so the
-	// commit does not depend on (or get blocked by) the developer's own git
-	// configuration.
+	// user.name/user.email と commit.gpgsign はコマンドごとに渡し、
+	// 開発者自身の git の設定に依存したり、それでブロックされたりしないよう
+	// にする。
 	for _, args := range [][]string{
 		{"-c", "init.defaultBranch=main", "init", "--quiet"},
 		{"add", "tracked.txt"},
 		{
-			"-c", "user.name=runpilot test", "-c", "user.email=test@example.com",
+			"-c", "user.name=run test", "-c", "user.email=test@example.com",
 			"-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "first",
 		},
 	} {
@@ -157,7 +205,7 @@ func initTempGitRepo(t *testing.T) (dir, headCommit string) {
 }
 
 // 本物の git に問い合わせる経路（ビルド情報に vcs.revision が無い、
-// "go run ./cmd/runpilot" という普段の動かし方で通る経路）で、作業ツリーが
+// "go run ./cmd/run" という普段の動かし方で通る経路）で、作業ツリーが
 // コミットと同じなら、記録の1行目のコミットは HEAD をそのまま名乗る。
 func TestReferenceCommit_UsesGitHeadWhenTreeIsClean(t *testing.T) {
 	_, head := initTempGitRepo(t)
@@ -188,8 +236,9 @@ func TestReferenceCommit_MarksDirtyWhenGitTreeIsDirty(t *testing.T) {
 	}
 }
 
-// 同じ経路で、HEAD そのものを git に聞けなかったら失敗する。コミットを名乗れない
-// まま記録を書くと、どのツリーが動いたのか分からない記録ができるためである。
+// 同じ経路で、HEAD そのものを git に聞けなかったら失敗する。コミットを
+// 名乗れないまま記録を書くと、どのツリーが動いたのか分からない記録ができる
+// ためである。
 func TestReferenceCommit_FailsWhenGitCannotTellTheHeadCommit(t *testing.T) {
 	// git init していない一時フォルダでは git rev-parse HEAD が
 	// "not a git repository" で失敗する。initTempGitRepo は呼ばない。

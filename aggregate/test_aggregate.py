@@ -2,8 +2,6 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #   "numpy",
-#   "pandas",
-#   "matplotlib",
 # ]
 # ///
 
@@ -230,17 +228,6 @@ def test_parse_quantity(value: str, expected: float) -> None:
     assert aggregate.parse_quantity(value) == pytest.approx(expected)
 
 
-# --- classify_gpu_class ---
-
-
-@pytest.mark.parametrize(
-    "gpu_count,expected_class",
-    [(0, "0"), (1, "1"), (2, "2-4"), (4, "2-4"), (8, "8")],
-)
-def test_classify_gpu_class(gpu_count: int, expected_class: str) -> None:
-    assert aggregate.classify_gpu_class(gpu_count) == expected_class
-
-
 # --- parse_time ---
 
 
@@ -370,7 +357,7 @@ def unfragmented_record() -> RecordBuilder:
     return b
 
 
-def test_compute_metrics_pending_wait_by_gpu_class_and_count_at_end() -> None:
+def test_compute_metrics_nonzero_wait_fraction_and_count_at_end() -> None:
     b = RecordBuilder()
     b.create_task(0, "task-1", "instance-1", gpu="0")
     b.create_task(0, "task-2", "instance-2", gpu="1")
@@ -388,12 +375,10 @@ def test_compute_metrics_pending_wait_by_gpu_class_and_count_at_end() -> None:
     # instance-4 and instance-6 are still pending when the record ends (t=30), so their
     # dwell time so far (observation_end - pending_since) is a right-censored wait, not
     # excluded (round1 review, Must): excluding it would make a scheduler that leaves
-    # more tasks stuck pending look like it waited *less*, the opposite of reality.
-    assert metrics.pending_wait_by_class == {
-        "0": [5.0, 0.0, 10.0, 0.0],
-        "1": [15.0],
-        "2-4": [10.0],
-    }
+    # more tasks stuck pending look like it has a *smaller* nonzero-wait fraction, the
+    # opposite of reality.
+    # waits: instance-1=5, instance-2=15, instance-3=10, instance-4=10 (censored),
+    # instance-5=0, instance-6=0 (censored) -> 4 of 6 are nonzero.
     assert metrics.pending_count_at_end == 2
     assert metrics.nonzero_wait_fraction == pytest.approx(4 / 6)
 
@@ -415,28 +400,11 @@ def test_compute_metrics_allocation_rate_and_unplaceable_free() -> None:
     assert metrics.unplaceable_free["cpu"] == pytest.approx(20.0)
 
 
-def test_compute_metrics_cluster_std_is_time_weighted() -> None:
-    b = RecordBuilder()
-    b.register_node(0, "node-1", {"cpu": "10"})
-    b.register_node(0, "node-2", {"cpu": "10"})
-    b.create_task(0, "task-1", "instance-1", cpu="1")
-    b.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    b.create_task(10, "task-2", "instance-2", cpu="1")
-    b.bind(20, "task-2", "instance-2", "node-1", {"cpu": "1"})
-    b.create_task(20, "task-3", "instance-3", cpu="1")
-    b.bind(30, "task-3", "instance-3", "node-2", {"cpu": "1"})
-    b.create_task(40, "task-4", "instance-4", cpu="0")  # marks the end of observation
-
-    metrics = aggregate.compute_metrics(b.transitions)
-
-    assert metrics.cluster_std == pytest.approx(0.5)
-
-
 def test_compute_metrics_reflects_complete_release_and_deregister_node() -> None:
     # Round1 review (test Must): complete, release, and deregister_node had no
     # test exercising them. A broken release (resources never freed, or freed
     # from the wrong node) or a deregistration that doesn't shrink capacity
-    # would pass silently with allocation_rate/cluster_std just quietly wrong.
+    # would pass silently with allocation_rate just quietly wrong.
     b = RecordBuilder()
     b.register_node(0, "node-1", {"cpu": "10"})
     b.register_node(0, "node-2", {"cpu": "10"})
@@ -453,11 +421,6 @@ def test_compute_metrics_reflects_complete_release_and_deregister_node() -> None
     # allocated=0/cap=10=0.0. (0.2*10 + 0.0*10 + 0.0*5) / 25 = 0.08 — if release
     # left the 4 cpu allocated, this would be higher.
     assert metrics.allocation_rate["cpu"] == pytest.approx(0.08)
-    # [0,10): node-1 has 1 running pod, node-2 has 0 -> std 0.5. [10,20): completed,
-    # both 0 -> std 0.0. [20,25): node-1 deregistered, only node-2's single value
-    # remains -> std 0.0. (0.5*10 + 0.0*10 + 0.0*5) / 25 = 0.2 — if complete left
-    # instance-a counted as running, this would be higher.
-    assert metrics.cluster_std == pytest.approx(0.2)
 
 
 def test_compute_metrics_reflects_delete_and_release() -> None:
@@ -525,41 +488,6 @@ def test_compute_metrics_leaves_unplaceable_free_empty_for_a_record_with_no_inte
     assert metrics.unplaceable_free == {}
 
 
-# --- final_instance_statuses ---
-
-
-def test_final_instance_statuses_reports_pending_running_and_completed() -> None:
-    # units/U05.md 数が合う: a pod's final status at the end of observation
-    # must be one of "completed" or "pending" (a bug would leave one stuck
-    # "running" or vanish from the replay entirely).
-    b = RecordBuilder()
-    b.create_task(0, "task-1", "instance-1")  # stays pending
-    b.create_task(0, "task-2", "instance-2")
-    b.bind(5, "task-2", "instance-2", "node-1", {"cpu": "1"})  # stays running
-    b.create_task(0, "task-3", "instance-3")
-    b.bind(5, "task-3", "instance-3", "node-1", {"cpu": "1"})
-    b.complete(10, "task-3", "instance-3", "node-1", {"cpu": "1"})
-
-    statuses = aggregate.final_instance_statuses(b.transitions)
-
-    assert statuses == {
-        "instance-1": "pending",
-        "instance-2": "running",
-        "instance-3": "completed",
-    }
-
-
-def test_final_instance_statuses_reports_deleted_after_preemption() -> None:
-    b = RecordBuilder()
-    b.create_task(0, "task-1", "instance-1")
-    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    b.delete(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
-
-    statuses = aggregate.final_instance_statuses(b.transitions)
-
-    assert statuses == {"instance-1": "deleted"}
-
-
 # --- DiffResult ---
 
 
@@ -623,11 +551,9 @@ def test_bootstrap_diff_result_does_not_depend_on_other_calls_sharing_a_seed() -
 
 def _metrics(**overrides) -> aggregate.Metrics:
     base = {
-        "pending_wait_by_class": {},
         "pending_count_at_end": 0,
         "allocation_rate": {},
         "unplaceable_free": {},
-        "cluster_std": 0.0,
         "nonzero_wait_fraction": 0.0,
     }
     base.update(overrides)
@@ -637,31 +563,36 @@ def _metrics(**overrides) -> aggregate.Metrics:
 def test_average_metrics_averages_scalars_across_iterations() -> None:
     iterations = [
         _metrics(
-            pending_count_at_end=2, cluster_std=1.0, nonzero_wait_fraction=0.5, allocation_rate={"cpu": 0.4}, unplaceable_free={"cpu": 10.0}
+            pending_count_at_end=2,
+            nonzero_wait_fraction=0.5,
+            allocation_rate={"cpu": 0.4},
+            unplaceable_free={"cpu": 10.0},
         ),
         _metrics(
-            pending_count_at_end=4, cluster_std=3.0, nonzero_wait_fraction=1.0, allocation_rate={"cpu": 0.6}, unplaceable_free={"cpu": 30.0}
+            pending_count_at_end=4,
+            nonzero_wait_fraction=1.0,
+            allocation_rate={"cpu": 0.6},
+            unplaceable_free={"cpu": 30.0},
         ),
     ]
 
     avg = aggregate.average_metrics(iterations)
 
     assert avg.pending_count_at_end == pytest.approx(3.0)
-    assert avg.cluster_std == pytest.approx(2.0)
     assert avg.nonzero_wait_fraction == pytest.approx(0.75)
     assert avg.allocation_rate["cpu"] == pytest.approx(0.5)
     assert avg.unplaceable_free["cpu"] == pytest.approx(20.0)
 
 
-def test_average_metrics_averages_cluster_std_skipping_iterations_with_no_data() -> None:
+def test_average_metrics_averages_nonzero_wait_fraction_skipping_iterations_with_no_data() -> None:
     # round2 review, test IMO: _mean_optional's "some None, some present" branch
-    # (the case this fix mainly protects — an iteration with no registered-node
-    # interval mixed with one that has data) was never exercised.
-    iterations = [_metrics(cluster_std=None), _metrics(cluster_std=1.0)]
+    # (an iteration with no wait data mixed with one that has data) was never
+    # exercised.
+    iterations = [_metrics(nonzero_wait_fraction=None), _metrics(nonzero_wait_fraction=1.0)]
 
     avg = aggregate.average_metrics(iterations)
 
-    assert avg.cluster_std == pytest.approx(1.0)
+    assert avg.nonzero_wait_fraction == pytest.approx(1.0)
 
 
 def test_average_metrics_averages_a_resource_only_over_iterations_that_measured_it() -> None:
@@ -732,18 +663,6 @@ def test_format_optional_renders_a_measured_value() -> None:
     assert aggregate._format_optional(0.0) == "0.0000"
 
 
-def test_average_metrics_concatenates_wait_times_and_means_them_per_class() -> None:
-    iterations = [
-        _metrics(pending_wait_by_class={"0": [1.0, 3.0]}),
-        _metrics(pending_wait_by_class={"0": [5.0]}),
-    ]
-
-    avg = aggregate.average_metrics(iterations)
-
-    assert avg.pending_wait_by_class == {"0": [1.0, 3.0, 5.0]}
-    assert avg.mean_wait_by_class["0"] == pytest.approx(3.0)
-
-
 # --- build_rho_sections ---
 
 
@@ -764,13 +683,13 @@ def make_run_record(scheduler_profile: str, rho: float, transitions, *, input_se
     return aggregate.RunRecord(header=header, transitions=transitions)
 
 
-def test_build_rho_sections_groups_by_rho_and_orders_least_allocated_first() -> None:
+def test_build_rho_sections_groups_by_rho_and_orders_schedulers_alphabetically() -> None:
     least = RecordBuilder()
-    least.create_task(0, "task-1", "instance-1", gpu="0")
-    least.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    least.create_task(0, "task-1", "instance-1")  # stays pending until observation ends
+    least.register_node(10, "node-1", {"cpu": "1"})  # marks the end of observation at t=10
     most = RecordBuilder()
-    most.create_task(0, "task-1", "instance-1", gpu="0")
-    most.bind(30, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most.create_task(0, "task-1", "instance-1")
+    most.bind(0, "task-1", "instance-1", "node-1", {"cpu": "1"})  # wait == 0
 
     records = [
         make_run_record("MostAllocated", 1.1, most.transitions),
@@ -783,10 +702,11 @@ def test_build_rho_sections_groups_by_rho_and_orders_least_allocated_first() -> 
     section = sections[0]
     assert section.rho == 1.1
     assert section.scheduler_order == ("LeastAllocated", "MostAllocated")
-    # LeastAllocated's wait (10s) minus MostAllocated's wait (30s) is -20, a single
-    # version so the diff is shown raw, not as a bootstrap CI (decisions.md).
-    assert section.diffs["wait:0"].raw == pytest.approx(-20.0)
-    assert section.diffs["wait:0"].ci is None
+    # LeastAllocated's task is still pending at the end (nonzero_wait_fraction = 1.0);
+    # MostAllocated's is bound at t=0 (nonzero_wait_fraction = 0.0). A single version,
+    # so the diff is shown raw, not as a bootstrap CI (decisions.md).
+    assert section.diffs["nonzero_wait_fraction"].raw == pytest.approx(1.0)
+    assert section.diffs["nonzero_wait_fraction"].ci is None
 
 
 def test_build_rho_sections_separates_different_rho_values() -> None:
@@ -810,17 +730,16 @@ def test_build_rho_sections_bootstraps_a_ci_across_two_input_versions() -> None:
     # (as opposed to bootstrap_diff itself, which is tested directly with multiple
     # values) was only ever exercised with a single input version.
     least_v1 = RecordBuilder()
-    least_v1.create_task(0, "task-1", "instance-1", gpu="0")
-    least_v1.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    least_v1.create_task(0, "task-1", "instance-1")  # stays pending
     most_v1 = RecordBuilder()
-    most_v1.create_task(0, "task-1", "instance-1", gpu="0")
-    most_v1.bind(30, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_v1.create_task(0, "task-1", "instance-1")
+    most_v1.bind(0, "task-1", "instance-1", "node-1", {"cpu": "1"})
     least_v2 = RecordBuilder()
-    least_v2.create_task(0, "task-1", "instance-1", gpu="0")
-    least_v2.bind(20, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    least_v2.create_task(0, "task-1", "instance-1")  # both stay pending
+    least_v2.create_task(0, "task-2", "instance-2")
     most_v2 = RecordBuilder()
-    most_v2.create_task(0, "task-1", "instance-1", gpu="0")
-    most_v2.bind(50, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_v2.create_task(0, "task-1", "instance-1")
+    most_v2.bind(0, "task-1", "instance-1", "node-1", {"cpu": "1"})
 
     records = [
         make_run_record("LeastAllocated", 1.1, least_v1.transitions, input_seed="seed-1"),
@@ -831,10 +750,10 @@ def test_build_rho_sections_bootstraps_a_ci_across_two_input_versions() -> None:
 
     section = aggregate.build_rho_sections(records, seed=0)[0]
 
-    # version seed-1's diff is 10-30=-20, seed-2's is 20-50=-30: two versions, so
-    # the result is a bootstrap CI, not a raw value.
-    assert section.diffs["wait:0"].raw is None
-    assert section.diffs["wait:0"].ci is not None
+    # version seed-1's diff (pending_count_at_end) is 1-0=1, seed-2's is 2-0=2: two
+    # versions, so the result is a bootstrap CI, not a raw value.
+    assert section.diffs["pending_count_at_end"].raw is None
+    assert section.diffs["pending_count_at_end"].ci is not None
 
 
 def test_build_rho_sections_skips_a_version_missing_one_scheduler() -> None:
@@ -842,14 +761,12 @@ def test_build_rho_sections_skips_a_version_missing_one_scheduler() -> None:
     # both schedulers" (e.g. one record was dropped as truncated) was never
     # exercised by any existing test.
     least_v1 = RecordBuilder()
-    least_v1.create_task(0, "task-1", "instance-1", gpu="0")
-    least_v1.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    least_v1.create_task(0, "task-1", "instance-1")  # stays pending
     most_v1 = RecordBuilder()
-    most_v1.create_task(0, "task-1", "instance-1", gpu="0")
-    most_v1.bind(30, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    most_v1.create_task(0, "task-1", "instance-1")
+    most_v1.bind(0, "task-1", "instance-1", "node-1", {"cpu": "1"})
     least_v2_only = RecordBuilder()  # seed-2 has no MostAllocated record at all
-    least_v2_only.create_task(0, "task-1", "instance-1", gpu="0")
-    least_v2_only.bind(20, "task-1", "instance-1", "node-1", {"cpu": "1"})
+    least_v2_only.create_task(0, "task-1", "instance-1")
 
     records = [
         make_run_record("LeastAllocated", 1.1, least_v1.transitions, input_seed="seed-1"),
@@ -859,44 +776,22 @@ def test_build_rho_sections_skips_a_version_missing_one_scheduler() -> None:
 
     section = aggregate.build_rho_sections(records, seed=0)[0]
 
-    # Only seed-1 contributed a diff (10-30=-20); seed-2 is skipped, so this is
-    # still a single-version raw value, not a bootstrap CI.
-    assert section.diffs["wait:0"].raw == pytest.approx(-20.0)
-    assert section.diffs["wait:0"].ci is None
-
-
-def test_build_rho_sections_uses_the_given_distributed_scheduler() -> None:
-    # Round1 review, Must: the scheduler sorted first (and compared against in
-    # the ρ = 1.1 prediction) must come from the caller, not a hardcoded
-    # "LeastAllocated" string literal.
-    tetris = RecordBuilder()
-    tetris.create_task(0, "task-1", "instance-1", gpu="0")
-    tetris.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    most = RecordBuilder()
-    most.create_task(0, "task-1", "instance-1", gpu="0")
-    most.bind(30, "task-1", "instance-1", "node-1", {"cpu": "1"})
-
-    records = [
-        make_run_record("MostAllocated", 1.1, most.transitions),
-        make_run_record("Tetris", 1.1, tetris.transitions),
-    ]
-
-    section = aggregate.build_rho_sections(records, seed=0, distributed_scheduler="Tetris")[0]
-
-    assert section.scheduler_order == ("Tetris", "MostAllocated")
-    assert section.distributed_scheduler == "Tetris"
+    # Only seed-1 contributed a diff (pending_count_at_end 1-0=1); seed-2 is
+    # skipped, so this is still a single-version raw value, not a bootstrap CI.
+    assert section.diffs["pending_count_at_end"].raw == pytest.approx(1.0)
+    assert section.diffs["pending_count_at_end"].ci is None
 
 
 def test_build_rho_sections_excludes_a_metric_one_scheduler_never_measured_from_the_diff() -> None:
-    # round2 review, correctness Must: a wait-time class one scheduler's run
-    # never produced (it never requested that many GPUs) must not be diffed
+    # round2 review, correctness Must: a metric one scheduler's run
+    # never produced (it never had any wait data) must not be diffed
     # against a silent default of 0 — that misrepresents "never measured" as
     # "measured and zero".
     least = RecordBuilder()
-    least.create_task(0, "task-1", "instance-1", gpu="1")
+    least.create_task(0, "task-1", "instance-1")
     least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
     most = RecordBuilder()
-    most.create_task(0, "task-1", "instance-1", gpu="0")  # never requests a GPU
+    most.register_node(0, "node-1", {"cpu": "1"})  # no task ever created, so no wait data
 
     records = [
         make_run_record("LeastAllocated", 0.8, least.transitions),
@@ -905,18 +800,16 @@ def test_build_rho_sections_excludes_a_metric_one_scheduler_never_measured_from_
 
     section = aggregate.build_rho_sections(records, seed=0)[0]
 
-    assert "wait:1" not in section.diffs  # MostAllocated never measured a "1" GPU-class wait
+    assert "nonzero_wait_fraction" not in section.diffs  # MostAllocated never measured a wait
 
 
 def test_build_rho_sections_does_not_treat_a_transitionless_record_as_measuring_zero() -> None:
     # round2 review, correctness Must: a record whose write was interrupted
     # right after the header (parses as complete, but has zero transitions,
     # per units/U04.md "着手時に決めること") must not silently count as having
-    # measured 0 for metrics it never had a chance to produce — mixing in such
-    # a record skewed scenarios 4-6's diffs (confirmed: wait:1's diff came out
-    # as 4.0000 before this fix).
+    # measured 0 for metrics it never had a chance to produce.
     least = RecordBuilder()
-    least.create_task(0, "task-1", "instance-1", gpu="1")
+    least.create_task(0, "task-1", "instance-1")
     least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
     most_crashed = RecordBuilder()  # no transitions at all
 
@@ -927,7 +820,7 @@ def test_build_rho_sections_does_not_treat_a_transitionless_record_as_measuring_
 
     section = aggregate.build_rho_sections(records, seed=0)[0]
 
-    assert "wait:1" not in section.diffs
+    assert "nonzero_wait_fraction" not in section.diffs
 
 
 def test_build_rho_sections_diffs_unplaceable_free_when_only_one_scheduler_fragmented() -> None:
@@ -995,33 +888,14 @@ def test_render_rho_markdown_includes_run_table_and_diffs() -> None:
     assert "ρ = 0.8" in md
     assert "LeastAllocated" in md
     assert "MostAllocated" in md
-    assert "wait:8" in md
-
-
-def test_render_rho_markdown_rho_0_5_includes_negative_control() -> None:
-    section = _two_scheduler_section(0.5)
-
-    md = aggregate.render_rho_markdown(section)
-
-    assert "陰性対照" in md
-    assert "待機時間が0でない" in md
-
-
-def test_render_rho_markdown_rho_1_1_includes_prediction_and_result() -> None:
-    section = _two_scheduler_section(1.1)
-
-    md = aggregate.render_rho_markdown(section)
-
-    assert "予測" in md
-    assert "結果" in md
-    # LeastAllocated waited 10s, MostAllocated waited 2s: LeastAllocated is bigger,
-    # so the prediction (units/U04.md, experiment.md 3.1) held.
-    assert "当たった" in md
+    diff_section = md.split("### スケジューラの差")[1]
+    assert "nonzero_wait_fraction" in diff_section
 
 
 def test_render_rho_markdown_per_run_table_includes_allocation_rate_and_unplaceable_free() -> None:
-    # Round1 review, Must: scenario 4 needs all 5 per-run metrics, but the table
-    # only ever showed pending_count_at_end / cluster_std / nonzero_wait_fraction.
+    # Round1 review, Must: the per-run table needs allocation_rate and
+    # unplaceable_free, but used to only ever show pending_count_at_end /
+    # nonzero_wait_fraction.
     b = RecordBuilder()
     b.register_node(0, "node-1", {"cpu": "10"})
     b.create_task(0, "task-1", "instance-1", cpu="4")
@@ -1037,10 +911,9 @@ def test_render_rho_markdown_per_run_table_includes_allocation_rate_and_unplacea
 
 def test_render_rho_markdown_per_run_table_shows_n_a_for_a_resource_this_run_never_measured() -> None:
     # round2 review, correctness IMO (round1 leftover, aggregate.py:688-689):
-    # allocation_rate/unplaceable_free showed a measured 0.0000 for a resource
-    # this particular run's record never had a node registering, instead of
-    # "n/a" like cluster_std already does — indistinguishable from an actually
-    # measured 0.
+    # allocation_rate/unplaceable_free must show "n/a" for a resource this
+    # particular run's record never had a node registering, instead of a
+    # measured 0.0000 — indistinguishable from an actually measured 0.
     with_cpu = RecordBuilder()
     with_cpu.register_node(0, "node-1", {"cpu": "10"})
     with_cpu.create_task(0, "task-1", "instance-1", cpu="1")
@@ -1072,74 +945,15 @@ def _per_run_cell(md: str, scheduler_profile: str, column: str) -> str:
 
 
 def test_render_rho_markdown_per_run_table_shows_zero_for_a_resource_measured_without_fragmentation() -> None:
-    # round3 review, correctness Must 1: ρ = 0.5 (the negative control) is
-    # expected to have no fragmentation at all, so showing "n/a" there made
-    # scenario 4's fifth per-run metric unreadable for a whole ρ — the run did
-    # measure 置けない空き資源の量 and it was 0.
+    # round3 review, correctness Must 1: showing "n/a" for a resource that was
+    # actually watched and never fragmented made 置けない空き資源の量
+    # unreadable — the run did measure it and it was 0.
     records = [make_run_record("LeastAllocated", 0.5, unfragmented_record().transitions)]
     section = aggregate.build_rho_sections(records, seed=0)[0]
 
     md = aggregate.render_rho_markdown(section)
 
     assert _per_run_cell(md, "LeastAllocated", "unplaceable_free:cpu") == "0.0000"
-
-
-def test_render_rho_markdown_per_run_table_shows_n_a_for_cluster_std_a_run_never_measured() -> None:
-    # round3 review, test IMO 3 (half-unfixed from round2): the per-run table's
-    # cluster_std cell goes through _format_optional too, and no test covered
-    # that wiring — only _format_optional itself and the allocation_rate column.
-    no_interval = RecordBuilder()
-    no_interval.create_task(0, "task-1", "instance-1")  # a single instant: no interval to average over
-    records = [make_run_record("LeastAllocated", 0.8, no_interval.transitions)]
-    section = aggregate.build_rho_sections(records, seed=0)[0]
-
-    md = aggregate.render_rho_markdown(section)
-
-    assert section.runs[0][1].cluster_std is None
-    assert _per_run_cell(md, "LeastAllocated", "cluster_std") == "n/a"
-
-
-def test_render_rho_markdown_links_to_the_figure_for_this_rho() -> None:
-    section = _two_scheduler_section(0.8)
-
-    md = aggregate.render_rho_markdown(section)
-
-    assert aggregate._figure_relpath(0.8) in md
-
-
-def test_render_rho_markdown_gives_no_verdict_to_small_gpu_classes_at_high_load() -> None:
-    # Round1 review (Must, upgraded from IMO): experiment.md 3.1's prediction is
-    # about tasks with a large request; the 0 and 1 GPU classes must be shown
-    # for context without a 当たった/当たらなかった verdict.
-    least = RecordBuilder()
-    least.create_task(0, "task-1", "instance-1", gpu="0")
-    least.bind(10, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    least.create_task(0, "task-2", "instance-2", gpu="8")
-    least.bind(10, "task-2", "instance-2", "node-1", {"cpu": "1"})
-    most = RecordBuilder()
-    most.create_task(0, "task-1", "instance-1", gpu="0")
-    most.bind(2, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    most.create_task(0, "task-2", "instance-2", gpu="8")
-    most.bind(2, "task-2", "instance-2", "node-1", {"cpu": "1"})
-    records = [
-        make_run_record("LeastAllocated", 1.1, least.transitions),
-        make_run_record("MostAllocated", 1.1, most.transitions),
-    ]
-    section = aggregate.build_rho_sections(records, seed=0)[0]
-
-    md = aggregate.render_rho_markdown(section)
-
-    # Both "スケジューラの差" and "予測と結果" have a row starting "| wait:8 |"; the
-    # prediction table's row is the one with a verdict column.
-    large_class_verdict_line = next(
-        line for line in md.splitlines() if line.startswith("| wait:8 |") and ("当たった" in line or "当たらなかった" in line)
-    )
-    assert "8.0000" in large_class_verdict_line
-    assert "当たった" in large_class_verdict_line  # LeastAllocated waited 10s vs MostAllocated's 2s
-    small_class_verdict_row_lines = [line for line in md.splitlines() if line.startswith("| wait:0 |") and "対象外" in line]
-    assert len(small_class_verdict_row_lines) == 1
-    assert "当たった" not in small_class_verdict_row_lines[0]
-    assert "当たらなかった" not in small_class_verdict_row_lines[0]
 
 
 def test_render_rho_markdown_shows_a_reason_when_there_are_not_exactly_two_schedulers() -> None:
@@ -1183,93 +997,6 @@ def test_render_rho_markdown_shows_a_reason_when_no_version_has_both_schedulers(
     assert "そろわ" in diff_section
 
 
-def test_render_rho_markdown_rho_1_1_shows_a_reason_when_no_version_has_both_schedulers() -> None:
-    # round2 review, correctness Must: the same empty-diffs case as above, but
-    # for the ρ = 1.1 prediction/result section, which must not render an
-    # empty table either.
-    least_only = RecordBuilder()
-    least_only.create_task(0, "task-1", "instance-1")
-    least_only.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    most_only = RecordBuilder()
-    most_only.create_task(0, "task-1", "instance-1")
-    most_only.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    records = [
-        make_run_record("LeastAllocated", 1.1, least_only.transitions, input_seed="seed-1"),
-        make_run_record("MostAllocated", 1.1, most_only.transitions, input_seed="seed-2"),
-    ]
-    section = aggregate.build_rho_sections(records, seed=0)[0]
-
-    md = aggregate.render_rho_markdown(section)
-
-    prediction_section = md.split("### 予測と結果（高負荷）")[1]
-    assert "| metric |" not in prediction_section
-    assert "そろわ" in prediction_section
-
-
-def test_render_rho_markdown_rho_1_1_says_which_metrics_were_missing_when_the_versions_did_line_up() -> None:
-    # round3 review, correctness Must 4 / maintainability Must: the ρ = 1.1
-    # section filters the diff down to the keys its prediction is about
-    # (wait: / unplaceable_free:), which can come out empty while the diff
-    # itself has other metrics. Blaming "the two profiles never coexisted in
-    # any input version" there told the reader the wrong reason: here both
-    # schedulers ran the same version, and the diff table below shows it.
-    least = RecordBuilder()  # no tasks at all, so no wait times to compare
-    least.register_node(0, "node-1", {"cpu": "10"})
-    least.register_node(10, "node-2", {"cpu": "1"})
-    most = RecordBuilder()  # and a disjoint resource, so no unplaceable_free to compare
-    most.register_node(0, "node-3", {"nvidia.com/gpu": "4"})
-    most.register_node(10, "node-4", {"nvidia.com/gpu": "1"})
-    records = [
-        make_run_record("LeastAllocated", 1.1, least.transitions),
-        make_run_record("MostAllocated", 1.1, most.transitions),
-    ]
-    section = aggregate.build_rho_sections(records, seed=0)[0]
-
-    md = aggregate.render_rho_markdown(section)
-
-    assert "pending_count_at_end" in md.split("### スケジューラの差")[1]  # the versions did line up
-    prediction_section = md.split("### 予測と結果（高負荷）")[1]
-    assert "| metric |" not in prediction_section
-    assert "そろわ" not in prediction_section
-    assert "予測の対象" in prediction_section
-
-
-def test_render_rho_markdown_rho_1_1_section_names_a_missing_distributed_scheduler() -> None:
-    # Round1 review, Must: when the configured distributed scheduler isn't one
-    # of this ρ's profiles, the ρ = 1.1 section must say so instead of just
-    # vanishing (as it did when the check was a literal "LeastAllocated" test).
-    a = RecordBuilder()
-    a.create_task(0, "task-1", "instance-1")
-    a.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    b = RecordBuilder()
-    b.create_task(0, "task-1", "instance-1")
-    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    records = [
-        make_run_record("Tetris", 1.1, a.transitions),
-        make_run_record("MostAllocated", 1.1, b.transitions),
-    ]
-    section = aggregate.build_rho_sections(records, seed=0)[0]  # default distributed_scheduler="LeastAllocated"
-
-    md = aggregate.render_rho_markdown(section)
-
-    assert "予測と結果" in md
-    assert "見つからない" in md
-
-
-def test_render_rho_markdown_treats_a_rho_within_tolerance_as_the_negative_control() -> None:
-    # Round1 review, Must: == on floats can miss a ρ that is meant to be 0.5 but
-    # carries ordinary floating-point noise from upstream computation.
-    b = RecordBuilder()
-    b.create_task(0, "task-1", "instance-1")
-    b.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
-    records = [make_run_record("LeastAllocated", 0.5 + 1e-9, b.transitions)]
-    section = aggregate.build_rho_sections(records, seed=0)[0]
-
-    md = aggregate.render_rho_markdown(section)
-
-    assert "陰性対照" in md
-
-
 # --- write_report ---
 
 
@@ -1307,7 +1034,7 @@ def _run_record_text(scheduler_profile: str, rho: float, builder: RecordBuilder)
     )
 
 
-def test_write_report_writes_markdown_and_one_png_figure_per_rho() -> None:
+def test_write_report_writes_markdown_for_every_rho() -> None:
     least = RecordBuilder()
     least.create_task(0, "task-1", "instance-1")
     least.bind(5, "task-1", "instance-1", "node-1", {"cpu": "1"})
@@ -1324,9 +1051,6 @@ def test_write_report_writes_markdown_and_one_png_figure_per_rho() -> None:
 
     assert "report.md" in writer.texts
     assert "ρ = 0.5" in writer.texts["report.md"]
-    assert len(writer.blobs) == 1
-    png_bytes = next(iter(writer.blobs.values()))
-    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")  # the PNG magic number
 
 
 def test_write_report_notes_the_fragmentation_approximation() -> None:
@@ -1527,7 +1251,7 @@ def test_run_fails_when_every_record_is_truncated() -> None:
 
 
 @pytest.mark.integration
-def test_run_writes_report_and_figures_to_real_output_dir(tmp_path: Path) -> None:
+def test_run_writes_report_to_real_output_dir(tmp_path: Path) -> None:
     records_dir = tmp_path / "records"
     records_dir.mkdir()
     output_dir = tmp_path / "out"
@@ -1541,7 +1265,6 @@ def test_run_writes_report_and_figures_to_real_output_dir(tmp_path: Path) -> Non
     assert code == 0
     assert (output_dir / "report.md").exists()
     assert "ρ = 0.5" in (output_dir / "report.md").read_text(encoding="utf-8")
-    assert list((output_dir / "figures").glob("*.png"))
 
 
 @pytest.mark.integration
