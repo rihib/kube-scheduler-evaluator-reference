@@ -165,7 +165,7 @@ func TestRun_WritesOneRunPerIteration(t *testing.T) {
 		"--pods=" + podsPath,
 		"--seed=1",
 		"--ratio=1.0",
-		"--rho=0.5",
+		"--rho=0.03",
 		"--iterations=3",
 	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
 	if code != 0 {
@@ -194,8 +194,8 @@ func TestRun_WritesOneRunPerIteration(t *testing.T) {
 		if got, _ := input["input_seed"].(string); got != "1" {
 			t.Errorf("input.input_seed = %q, want %q", got, "1")
 		}
-		if got, _ := input["rho"].(float64); got != 0.5 {
-			t.Errorf("input.rho = %v, want 0.5", got)
+		if got, _ := input["rho"].(float64); got != 0.03 {
+			t.Errorf("input.rho = %v, want 0.03", got)
 		}
 		sched, _ := r.header["scheduler"].(map[string]any)
 		if sched == nil {

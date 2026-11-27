@@ -52,7 +52,7 @@ func TestRun_WritesOneRecordFileToRealOutputDir(t *testing.T) {
 		"--pods=" + podsPath,
 		"--seed=1",
 		"--ratio=1.0",
-		"--rho=0.5",
+		"--rho=0.03",
 		"--iterations=1",
 		"--out=" + outDir,
 	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
@@ -68,8 +68,8 @@ func TestRun_WritesOneRecordFileToRealOutputDir(t *testing.T) {
 		t.Fatalf("record file count = %d, want 1: %v", len(entries), entries)
 	}
 	h := readHeader(t, filepath.Join(outDir, entries[0].Name()))
-	if h.Input.Rho != 0.5 {
-		t.Errorf("input.rho = %v, want 0.5", h.Input.Rho)
+	if h.Input.Rho != 0.03 {
+		t.Errorf("input.rho = %v, want 0.03", h.Input.Rho)
 	}
 }
 
@@ -91,7 +91,7 @@ func TestRun_WritesRecordAggregateCanTurnIntoReport(t *testing.T) {
 		"--pods=" + podsPath,
 		"--seed=1",
 		"--ratio=1.0",
-		"--rho=0.5",
+		"--rho=0.03",
 		"--iterations=1",
 		"--out=" + recordsDir,
 	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
@@ -116,7 +116,7 @@ func TestRun_WritesRecordAggregateCanTurnIntoReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read the report aggregate.py wrote: %v", err)
 	}
-	if !strings.Contains(string(report), "ρ = 0.5") {
+	if !strings.Contains(string(report), "ρ = 0.03") {
 		t.Errorf("report has no section for the ρ this command ran:\n%s", report)
 	}
 }
