@@ -73,6 +73,54 @@ func TestRun_WritesOneRecordFileToRealOutputDir(t *testing.T) {
 	}
 }
 
+// このコマンドが書いた記録を、集計のコマンド（aggregate/aggregate.py）が
+// そのまま読んで報告にできる。記録を書く側と読む側は別の言語なので、ヘッダの
+// 項目の名前（aggregate.py の parse_record が必須で読む input.*・execution.*・
+// scheduler.profile）が食い違っても、どちらかのテストだけでは落ちない。報告に
+// 動かした ρ の節ができることまで確かめ、ヘッダの値が読み側に届いていることを
+// 見る。
+func TestRun_WritesRecordAggregateCanTurnIntoReport(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", runTestNodesCSV)
+	podsPath := writeTempCSV(t, runTestPodsFile, runTestPodsCSV)
+	recordsDir := t.TempDir()
+	reportDir := t.TempDir()
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+		"--seed=1",
+		"--ratio=1.0",
+		"--rho=0.5",
+		"--iterations=1",
+		"--out=" + recordsDir,
+	}, &stderr, nil, func() (string, error) { return "fake-reference-commit", nil })
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	// aggregate.py は PEP723 のインラインスクリプトなので、uv が依存を解決
+	// して流す（testing.md「Python は ... uv run で流す」）。uv が無ければ
+	// この境目の検査が静かに消えるので、飛ばさずに落とす。
+	aggregate, err := filepath.Abs(filepath.Join("..", "..", "aggregate", "aggregate.py"))
+	if err != nil {
+		t.Fatalf("failed to resolve aggregate.py's path: %v", err)
+	}
+	cmd := exec.Command("uv", "run", aggregate,
+		"--records-dir="+recordsDir, "--output-dir="+reportDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("aggregate.py could not read the record this command wrote: %v (output: %s)", err, out)
+	}
+
+	report, err := os.ReadFile(filepath.Join(reportDir, "report.md"))
+	if err != nil {
+		t.Fatalf("failed to read the report aggregate.py wrote: %v", err)
+	}
+	if !strings.Contains(string(report), "ρ = 0.5") {
+		t.Errorf("report has no section for the ρ this command ran:\n%s", report)
+	}
+}
+
 // Pod の CSV のパスが存在しないときは、終了コードが0でなく、記録のファイルは
 // 1つもできない。
 func TestRun_FailsWhenPodsPathDoesNotExist(t *testing.T) {
