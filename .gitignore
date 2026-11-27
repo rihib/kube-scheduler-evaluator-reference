@@ -1,7 +1,7 @@
 bin/
 log/
 .cache/
-# cmd/runpilot's default --out. Tracking it would also make every later run's
-# record name a "-dirty" commit, since runpilot reads "git status --porcelain"
+# cmd/run's default --out. Tracking it would also make every later run's
+# record name a "-dirty" commit, since cmd/run reads "git status --porcelain"
 # to decide that and an untracked records/ shows up there.
 records/

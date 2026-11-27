@@ -95,11 +95,6 @@ class Metrics:
     # that resource during intervals where a pending task's request fits the cluster's
     # aggregate free resources but fits no single node (experiment.md 3.4).
     unplaceable_free: dict[str, float]
-    # Mean pending-state dwell time (seconds), over every instance that left pending via
-    # assign_node within the observation plus every instance still pending at the end
-    # (right-censored at the observation's end). None when no instance ever had wait
-    # data, distinct from a measured mean of exactly 0.0.
-    mean_pending_wait: float | None
     # Fraction of instances with wait data whose pending dwell time was nonzero.
     # None when no instance ever had wait data (round1 review, correctness IMO),
     # distinct from a measured fraction of exactly 0.0.
@@ -317,13 +312,13 @@ class _MetricsAccumulator:
         return {r: self._unplaceable_free_weighted.get(r, 0.0) for r in self._measured_resources}
 
 
-def _censor_still_pending_waits(world: _World, observation_end: float, pending_waits: list[float]) -> tuple[int, int]:
-    """Adds one right-censored wait (observation_end - pending_since) for every
+def _censor_still_pending_waits(world: _World, observation_end: float) -> tuple[int, int]:
+    """Counts one right-censored wait (observation_end - pending_since) for every
     instance still pending when the record ends, instead of leaving them out
-    of both the mean wait and nonzero_wait_fraction's denominator (round1
-    review, Must: excluding them made a scheduler that leaves more tasks
-    stuck pending look like it has a *smaller* nonzero-wait fraction and a
-    *shorter* mean wait — the opposite of what actually happened).
+    of nonzero_wait_fraction's denominator (round1 review, Must: excluding
+    them made a scheduler that leaves more tasks stuck pending look like it
+    has a *smaller* nonzero-wait fraction — the opposite of what actually
+    happened).
     Returns (count added, count with a nonzero wait) for the caller to fold
     into its own totals.
     """
@@ -333,7 +328,6 @@ def _censor_still_pending_waits(world: _World, observation_end: float, pending_w
         if world.instance_status.get(instance_id) != "pending":
             continue  # deleted while still unassigned: not a censored wait
         wait = max(0.0, observation_end - start)
-        pending_waits.append(wait)
         added += 1
         if wait > 0:
             nonzero += 1
@@ -341,25 +335,22 @@ def _censor_still_pending_waits(world: _World, observation_end: float, pending_w
 
 
 def compute_metrics(transitions: Sequence[Transition]) -> Metrics:
-    """Computes one run's experiment 1 metrics from its transition record
-    (units/U04.md Implementation Decisions, experiment.md 3.4)."""
+    """Computes one run's metrics from its transition record (aggregate.py's
+    time-integrated metrics, experiment.md 3.4)."""
     ordered = sorted(transitions, key=lambda t: (parse_time(t.time), t.seq))
     if not ordered:
         return Metrics(
             pending_count_at_end=0,
             allocation_rate={},
             unplaceable_free={},
-            mean_pending_wait=None,
             nonzero_wait_fraction=None,
         )
 
-    pending_waits: list[float] = []
     nonzero_wait_count = 0
     wait_count_total = 0
 
     def on_wait(wait: float) -> None:
         nonlocal nonzero_wait_count, wait_count_total
-        pending_waits.append(wait)
         wait_count_total += 1
         if wait > 0:
             nonzero_wait_count += 1
@@ -382,34 +373,19 @@ def compute_metrics(transitions: Sequence[Transition]) -> Metrics:
         i = j
 
     observation_end = prev_time if prev_time is not None else 0.0
-    censored_added, censored_nonzero = _censor_still_pending_waits(world, observation_end, pending_waits)
+    censored_added, censored_nonzero = _censor_still_pending_waits(world, observation_end)
     wait_count_total += censored_added
     nonzero_wait_count += censored_nonzero
 
     pending_count_at_end = sum(1 for status in world.instance_status.values() if status == "pending")
     nonzero_wait_fraction = nonzero_wait_count / wait_count_total if wait_count_total > 0 else None
-    mean_pending_wait = sum(pending_waits) / len(pending_waits) if pending_waits else None
 
     return Metrics(
         pending_count_at_end=pending_count_at_end,
         allocation_rate=accumulator.allocation_rate(),
         unplaceable_free=accumulator.unplaceable_free(),
-        mean_pending_wait=mean_pending_wait,
         nonzero_wait_fraction=nonzero_wait_fraction,
     )
-
-
-def final_instance_statuses(transitions: Sequence[Transition]) -> dict[str, str]:
-    """Replays transitions and returns each instance's final status
-    (units/U05.md "数が合う": every pod should end up either "completed" or
-    "pending" at the end of observation). Reuses the same replay compute_metrics
-    does, so this sees exactly the state compute_metrics's callers already trust.
-    """
-    world = _World()
-    ordered = sorted(transitions, key=lambda t: (parse_time(t.time), t.seq))
-    for tr in ordered:
-        world.apply(tr, parse_time(tr.time))
-    return dict(world.instance_status)
 
 
 @dataclass(frozen=True)
@@ -471,7 +447,6 @@ class VersionAverage:
     pending_count_at_end: float
     allocation_rate: dict[str, float]
     unplaceable_free: dict[str, float]
-    mean_wait: float | None
     nonzero_wait_fraction: float | None
 
 
@@ -481,7 +456,7 @@ def _mean(values: list[float]) -> float:
 
 def _mean_optional(values: list[float | None]) -> float | None:
     """Averages the non-None values, skipping iterations with no data for this
-    metric (Metrics.mean_pending_wait / nonzero_wait_fraction can be None).
+    metric (Metrics.nonzero_wait_fraction can be None).
     None if every iteration had no data."""
     present = [v for v in values if v is not None]
     return _mean(present) if present else None
@@ -495,8 +470,8 @@ def average_metrics(iterations: list[Metrics]) -> VersionAverage:
     for a resource — because it registered no node with that resource, or
     (units/U04.md "着手時に決めること") had zero transitions at all — is
     excluded from that resource's average rather than folded in as a
-    measured 0, the same "not measured, not zero" treatment mean_pending_wait
-    and nonzero_wait_fraction already get via _mean_optional.
+    measured 0, the same "not measured, not zero" treatment
+    nonzero_wait_fraction already gets via _mean_optional.
 
     A missing key is the *only* sign of "not measured" this relies on, which
     is why _MetricsAccumulator.unplaceable_free fills in a 0.0 for every
@@ -520,7 +495,6 @@ def average_metrics(iterations: list[Metrics]) -> VersionAverage:
         pending_count_at_end=_mean([m.pending_count_at_end for m in iterations]),
         allocation_rate=allocation_rate,
         unplaceable_free=unplaceable_free,
-        mean_wait=_mean_optional([m.mean_pending_wait for m in iterations]),
         nonzero_wait_fraction=_mean_optional([m.nonzero_wait_fraction for m in iterations]),
     )
 
@@ -556,13 +530,12 @@ def _scalar_pairs(a: VersionAverage, b: VersionAverage):
     """Yields (metric key, a's value, b's value) for every metric both sides
     actually measured.
 
-    Per-resource and per-class metrics use the intersection of a's and b's
-    keys, not the union with a 0.0 default (round2 review, correctness Must):
-    a key present on one side but absent on the other means that side never
-    measured it (e.g. its scheduler never requested that many GPUs, or its
-    record had zero transitions — units/U04.md "着手時に決めること"), which
-    must not be diffed against a default of 0 as if it had been measured and
-    was exactly zero.
+    Per-resource metrics use the intersection of a's and b's keys, not the
+    union with a 0.0 default (round2 review, correctness Must): a key
+    present on one side but absent on the other means that side never
+    measured it (e.g. its record had zero transitions — units/U04.md
+    "着手時に決めること"), which must not be diffed against a default of 0 as
+    if it had been measured and was exactly zero.
 
     This is only sound because a missing key really does mean "not measured"
     by the time it gets here: _MetricsAccumulator.unplaceable_free fills in a
@@ -571,8 +544,6 @@ def _scalar_pairs(a: VersionAverage, b: VersionAverage):
     the intersection never silently discards a real 0.
     """
     yield "pending_count_at_end", a.pending_count_at_end, b.pending_count_at_end
-    if a.mean_wait is not None and b.mean_wait is not None:
-        yield "wait", a.mean_wait, b.mean_wait
     if a.nonzero_wait_fraction is not None and b.nonzero_wait_fraction is not None:
         yield "nonzero_wait_fraction", a.nonzero_wait_fraction, b.nonzero_wait_fraction
     for r in sorted(set(a.allocation_rate) & set(b.allocation_rate)):
