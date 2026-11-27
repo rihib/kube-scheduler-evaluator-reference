@@ -72,12 +72,81 @@ type openbPodRecord struct {
 	cpuMilli      int64
 	memoryMiB     int64
 	gpuCount      int64
+	gpuMilli      int64
 	gpuSpec       string
 	qos           string
 	phase         string
 	creationTime  int64
 	deletionTime  int64
 	scheduledTime int64
+}
+
+// openbNodeRecord is one row of the openb node CSV, parsed into typed
+// fields, without building a corev1.Node (BuildInputVersion decides how to
+// represent a node's GPUs; parseNodeRecords's callers want the old
+// nvidia.com/gpu extended-resource form, see decisions.md's "GPU の
+// annotation の形").
+type openbNodeRecord struct {
+	name      string
+	cpuMilli  int64
+	memoryMiB int64
+	gpuCount  int64
+	model     string
+}
+
+// parseNodeCSVRecords reads the openb node CSV from r into typed records,
+// without building any corev1.Node or deciding how its GPUs are
+// represented.
+//
+// sn,cpu_milli,memory_mib,gpu,model
+// openb-node-0229,96000,786432,8,V100M32
+func parseNodeCSVRecords(r io.Reader) ([]openbNodeRecord, error) {
+	reader := csv.NewReader(r)
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
+
+	var records []openbNodeRecord
+	for {
+		record, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("clusterdata: node csv read error: %w", err)
+		}
+		if len(record) < 5 {
+			return nil, fmt.Errorf("clusterdata: malformed node record (len=%d)", len(record))
+		}
+
+		name := strings.TrimSpace(record[0])
+		if strings.EqualFold(name, "sn") {
+			continue
+		}
+
+		cpuMilli, err := parseIntField(record[1], "cpu_milli")
+		if err != nil {
+			return nil, err
+		}
+		memoryMiB, err := parseIntField(record[2], "memory_mib")
+		if err != nil {
+			return nil, err
+		}
+		gpuCount, err := parseIntField(record[3], "gpu")
+		if err != nil {
+			return nil, err
+		}
+		model := strings.TrimSpace(record[4])
+
+		records = append(records, openbNodeRecord{
+			name:      name,
+			cpuMilli:  cpuMilli,
+			memoryMiB: memoryMiB,
+			gpuCount:  gpuCount,
+			model:     model,
+		})
+	}
+
+	return records, nil
 }
 
 // parseInputVersionPods reads the openb pod CSV from podsCSV into typed
@@ -125,6 +194,10 @@ func parseInputVersionPods(podsCSV io.Reader) ([]openbPodRecord, error) {
 		if err != nil {
 			return nil, err
 		}
+		gpuMilli, err := parseIntField(record[4], "gpu_milli")
+		if err != nil {
+			return nil, err
+		}
 		gpuSpec := strings.TrimSpace(record[5])
 		qos := strings.TrimSpace(record[6])
 		phase := strings.TrimSpace(record[7])
@@ -155,6 +228,7 @@ func parseInputVersionPods(podsCSV io.Reader) ([]openbPodRecord, error) {
 			cpuMilli:      cpuMilli,
 			memoryMiB:     memoryMiB,
 			gpuCount:      gpuCount,
+			gpuMilli:      gpuMilli,
 			gpuSpec:       gpuSpec,
 			qos:           qos,
 			phase:         phase,

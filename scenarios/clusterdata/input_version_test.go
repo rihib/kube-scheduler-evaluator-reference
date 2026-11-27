@@ -32,11 +32,6 @@ func isNodeObject(o any) bool {
 	return ok
 }
 
-func isReplicaSetObject(o any) bool {
-	_, ok := o.(*appsv1.ReplicaSet)
-	return ok
-}
-
 // jobCreateByName returns the ReplicaSet created by events whose name is
 // name, or nil if there is no such Create event.
 func jobCreateByName(events []definition.Event, name string) *appsv1.ReplicaSet {
@@ -70,6 +65,174 @@ func jobCreateNames(events []definition.Event) []string {
 	return names
 }
 
+// nodeCreateByName returns the Node created by events whose name is name,
+// or nil if there is no such Create event.
+func nodeCreateByName(events []definition.Event, name string) *corev1.Node {
+	for _, e := range events {
+		if e.EventType() != definition.EventTypeCreate {
+			continue
+		}
+		node, ok := e.Object().(*corev1.Node)
+		if !ok || node.Name != name {
+			continue
+		}
+		return node
+	}
+	return nil
+}
+
+// nodeCreateNames returns the names of the Nodes created by events, in
+// event order.
+func nodeCreateNames(events []definition.Event) []string {
+	var names []string
+	for _, e := range events {
+		if e.EventType() != definition.EventTypeCreate {
+			continue
+		}
+		node, ok := e.Object().(*corev1.Node)
+		if !ok {
+			continue
+		}
+		names = append(names, node.Name)
+	}
+	return names
+}
+
+func approxEqual(a, b, epsilon float64) bool {
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= epsilon
+}
+
+// ===== ノードの形ごとの縮め方 =====
+
+// 複数の形があるとき、形ごとに独立して縮める割合が適用される。
+func TestBuildInputVersion_ShrinksEachShapeIndependently(t *testing.T) {
+	var nodesCSV strings.Builder
+	nodesCSV.WriteString(nodesCSVHeader)
+	for i := 0; i < 10; i++ {
+		fmt.Fprintf(&nodesCSV, "shape-a-%02d,1000,1024,0,\n", i)
+	}
+	for i := 0; i < 4; i++ {
+		fmt.Fprintf(&nodesCSV, "shape-b-%02d,2000,2048,0,\n", i)
+	}
+	podsCSV := strings.NewReader(podsCSVHeader)
+
+	events, summary, err := BuildInputVersion(strings.NewReader(nodesCSV.String()), podsCSV, 1, 1.0, 0.5)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	if summary.SelectedNodeCount != 7 {
+		t.Errorf("SelectedNodeCount = %d, want 7 (round(10*0.5)=5 + round(4*0.5)=2)", summary.SelectedNodeCount)
+	}
+	if got := countEventsByType(events, definition.EventTypeCreate, isNodeObject); got != 7 {
+		t.Errorf("node create events = %d, want 7", got)
+	}
+	if len(summary.NodeShapes) != 2 {
+		t.Fatalf("NodeShapes = %+v, want 2 shapes", summary.NodeShapes)
+	}
+	counts := map[int64]int{}
+	for _, shape := range summary.NodeShapes {
+		counts[shape.CPUMilli] = shape.Count
+	}
+	if counts[1000] != 5 {
+		t.Errorf("shape cpu=1000 count = %d, want 5", counts[1000])
+	}
+	if counts[2000] != 2 {
+		t.Errorf("shape cpu=2000 count = %d, want 2", counts[2000])
+	}
+}
+
+// 縮める割合をかけると0台になる形でも、最低1台は残す。
+func TestBuildInputVersion_KeepsAtLeastOneNodePerShape(t *testing.T) {
+	var nodesCSV strings.Builder
+	nodesCSV.WriteString(nodesCSVHeader)
+	for i := 0; i < 3; i++ {
+		fmt.Fprintf(&nodesCSV, "node-%02d,1000,1024,0,\n", i)
+	}
+	podsCSV := strings.NewReader(podsCSVHeader)
+
+	_, summary, err := BuildInputVersion(strings.NewReader(nodesCSV.String()), podsCSV, 1, 1.0, 0.05)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	if summary.SelectedNodeCount != 1 {
+		t.Errorf("SelectedNodeCount = %d, want 1 (round(3*0.05)=0, clamped to 1)", summary.SelectedNodeCount)
+	}
+}
+
+// 同じ GPU の枚数と型でも、CPU やメモリが違うノードは別の形として縮められる。
+func TestBuildInputVersion_SameGPUDifferentCPUMemoryAreDifferentShapes(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader +
+		"node-small,16000,131072,2,P100\n" +
+		"node-large,32000,262144,2,P100\n")
+	podsCSV := strings.NewReader(podsCSVHeader)
+
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	if len(summary.NodeShapes) != 2 {
+		t.Errorf("NodeShapes = %+v, want 2 (same GPU/model but different CPU/memory)", summary.NodeShapes)
+	}
+}
+
+// 同じシードなら、縮めたときに残るノードの集合が同じになる。
+func TestBuildInputVersion_SameSeedProducesSameNodeSelection(t *testing.T) {
+	var nodesCSV strings.Builder
+	nodesCSV.WriteString(nodesCSVHeader)
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&nodesCSV, "node-%02d,1000,1024,0,\n", i)
+	}
+	podsCSV := strings.NewReader(podsCSVHeader)
+
+	events1, _, err := BuildInputVersion(strings.NewReader(nodesCSV.String()), strings.NewReader(podsCSVHeader), 42, 1.0, 0.4)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+	events2, _, err := BuildInputVersion(strings.NewReader(nodesCSV.String()), podsCSV, 42, 1.0, 0.4)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	names1 := nodeCreateNames(events1)
+	names2 := nodeCreateNames(events2)
+	if !slices.Equal(names1, names2) {
+		t.Errorf("same seed produced different node selections: %v vs %v", names1, names2)
+	}
+}
+
+// シードが違うと、縮めたときに残るノードの集合が違う。
+func TestBuildInputVersion_DifferentSeedsProduceDifferentNodeSelection(t *testing.T) {
+	var nodesCSV strings.Builder
+	nodesCSV.WriteString(nodesCSVHeader)
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&nodesCSV, "node-%02d,1000,1024,0,\n", i)
+	}
+
+	eventsSeed1, _, err := BuildInputVersion(strings.NewReader(nodesCSV.String()), strings.NewReader(podsCSVHeader), 1, 1.0, 0.4)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+	eventsSeed2, _, err := BuildInputVersion(strings.NewReader(nodesCSV.String()), strings.NewReader(podsCSVHeader), 2, 1.0, 0.4)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	namesSeed1 := nodeCreateNames(eventsSeed1)
+	namesSeed2 := nodeCreateNames(eventsSeed2)
+	if slices.Equal(namesSeed1, namesSeed2) {
+		t.Errorf("different seeds (1, 2) produced the same node selection: %v", namesSeed1)
+	}
+}
+
+// ===== Pod の扱い（Pending・Failed・使った件数） =====
+
 // 入力の版は、ノードの CSV にある行をすべて使う。
 func TestBuildInputVersion_UsesAllNodes(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader +
@@ -79,7 +242,7 @@ func TestBuildInputVersion_UsesAllNodes(t *testing.T) {
 		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
 		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
-	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -101,7 +264,7 @@ func TestBuildInputVersion_ExcludesPendingPods(t *testing.T) {
 		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n" +
 		"openb-pod-running2,1000,1024,0,0,,LS,Running,50,150,60\n")
 
-	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -113,8 +276,8 @@ func TestBuildInputVersion_ExcludesPendingPods(t *testing.T) {
 	if summary.UsedPodCount != 2 {
 		t.Errorf("UsedPodCount = %d, want 2", summary.UsedPodCount)
 	}
-	if summary.ExcludedPodCount != 1 {
-		t.Errorf("ExcludedPodCount = %d, want 1", summary.ExcludedPodCount)
+	if summary.ExcludedPendingPodCount != 1 {
+		t.Errorf("ExcludedPendingPodCount = %d, want 1", summary.ExcludedPendingPodCount)
 	}
 }
 
@@ -127,7 +290,7 @@ func TestBuildInputVersion_KeepsFailedPods(t *testing.T) {
 		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n" +
 		"openb-pod-running2,1000,1024,0,0,,LS,Running,50,150,60\n")
 
-	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -151,7 +314,7 @@ func TestBuildInputVersion_ExecutionDurationIsDeletionMinusScheduled(t *testing.
 		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
 		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
-	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -168,16 +331,18 @@ func TestBuildInputVersion_ExecutionDurationIsDeletionMinusScheduled(t *testing.
 	}
 }
 
-// GPU を要求する Pod には gpu-milli 注釈にGPU1枚あたりの既定値（1000）を
-// 入れる。evaluator はこの注釈を num_gpu×1000 の既定より優先するので、0の
-// ままだと GPU を要求する Pod すべての GPU 利用率が記録上0になってしまう。
-func TestBuildInputVersion_GPUMilliAnnotationIsDefaultPerGPU(t *testing.T) {
+// ===== GPU の annotation =====
+
+// Pod の GPU 要求は、CSV の num_gpu と gpu_milli の値どおりに
+// alibabacloud.com/gpu-count と alibabacloud.com/gpu-milli の注釈になる
+// （FGD の公開の実装と同じ形。decisions.md「GPU の annotation の形」）。
+func TestBuildInputVersion_PodGPUAnnotationsMatchCSV(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,2,V100M16\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,1,1000,,LS,Running,0,100,10\n" +
+		"openb-pod-0000,1000,1024,2,500,,LS,Running,0,100,10\n" +
 		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
-	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -186,22 +351,80 @@ func TestBuildInputVersion_GPUMilliAnnotationIsDefaultPerGPU(t *testing.T) {
 	if job == nil {
 		t.Fatalf("no create event for openb-pod-0000")
 	}
-	key := fmt.Sprintf("%s/gpu-milli", consts.UserID)
-	got := job.Spec.Template.Annotations[key]
-	if got != "1000" {
-		t.Errorf("gpu-milli annotation = %q, want %q", got, "1000")
+	annotations := job.Spec.Template.Annotations
+	if got := annotations["alibabacloud.com/gpu-count"]; got != "2" {
+		t.Errorf("gpu-count annotation = %q, want %q", got, "2")
+	}
+	if got := annotations["alibabacloud.com/gpu-milli"]; got != "500" {
+		t.Errorf("gpu-milli annotation = %q, want %q", got, "500")
+	}
+}
+
+// GPU を要求する Pod の資源の要求には、nvidia.com/gpu のような拡張リソースは
+// 無い（GPU は annotation だけで表す）。
+func TestBuildInputVersion_PodHasNoGPUExtendedResourceRequest(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,2,V100M16\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,2,500,,LS,Running,0,100,10\n" +
+		"openb-pod-anchor,1000,1024,0,0,,LS,Running,50,150,60\n")
+
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	job := jobCreateByName(events, "openb-pod-0000")
+	if job == nil {
+		t.Fatalf("no create event for openb-pod-0000")
+	}
+	requests := job.Spec.Template.Spec.Containers[0].Resources.Requests
+	if _, ok := requests[corev1.ResourceName("nvidia.com/gpu")]; ok {
+		t.Errorf("requests = %v, want no nvidia.com/gpu extended resource", requests)
+	}
+}
+
+// ノードの GPU の容量は、alibabacloud.com/gpu-count と
+// alibabacloud.com/gpu-milli（1枚あたり1000）で表す。nvidia.com/gpu の
+// 拡張リソースは使わない。
+func TestBuildInputVersion_NodeCapacityUsesAlibabacloudGPUKeys(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,4,V100M16\n")
+	podsCSV := strings.NewReader(podsCSVHeader)
+
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	node := nodeCreateByName(events, "openb-node-0000")
+	if node == nil {
+		t.Fatalf("no create event for openb-node-0000")
+	}
+	gpuCount := node.Status.Capacity[corev1.ResourceName("alibabacloud.com/gpu-count")]
+	if got := gpuCount.Value(); got != 4 {
+		t.Errorf("gpu-count capacity = %d, want 4", got)
+	}
+	gpuMilli := node.Status.Capacity[corev1.ResourceName("alibabacloud.com/gpu-milli")]
+	if got := gpuMilli.Value(); got != 4000 {
+		t.Errorf("gpu-milli capacity = %d, want 4000", got)
+	}
+	if _, ok := node.Status.Capacity[corev1.ResourceName("nvidia.com/gpu")]; ok {
+		t.Errorf("capacity = %v, want no nvidia.com/gpu extended resource", node.Status.Capacity)
+	}
+	allocGPUCount := node.Status.Allocatable[corev1.ResourceName("alibabacloud.com/gpu-count")]
+	if got := allocGPUCount.Value(); got != 4 {
+		t.Errorf("gpu-count allocatable = %d, want 4", got)
 	}
 }
 
 // gpu_spec が空でない Pod には、GPU の型のラベルが指定された型のどれかに
 // 一致するノードにだけ置けるよう nodeAffinity を付ける。
 func TestBuildInputVersion_AddsNodeAffinityFromGPUSpec(t *testing.T) {
-	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,1,V100M16\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
 		"openb-pod-0000,1000,1024,1,1000,V100M16|V100M32,LS,Running,0,100,10\n" +
 		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
-	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -240,7 +463,7 @@ func TestBuildInputVersion_NoNodeAffinityWithoutGPUSpec(t *testing.T) {
 		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
 		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
-	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -254,6 +477,8 @@ func TestBuildInputVersion_NoNodeAffinityWithoutGPUSpec(t *testing.T) {
 	}
 }
 
+// ===== Pod の順序 =====
+
 func tenEligiblePodsCSV() *strings.Reader {
 	var b strings.Builder
 	b.WriteString(podsCSVHeader)
@@ -263,49 +488,6 @@ func tenEligiblePodsCSV() *strings.Reader {
 	return strings.NewReader(b.String())
 }
 
-// 入力の版は、シードから Pending を除いた Pod の80%を抜き出す。
-func TestBuildInputVersion_SamplesEightyPercentOfEligiblePods(t *testing.T) {
-	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
-
-	_, summary, err := BuildInputVersion(nodesCSV, tenEligiblePodsCSV(), 1, 1.0, 0.8)
-	if err != nil {
-		t.Fatalf("BuildInputVersion returned error: %v", err)
-	}
-
-	if summary.UsedPodCount != 8 {
-		t.Errorf("UsedPodCount = %d, want 8", summary.UsedPodCount)
-	}
-	if summary.ExcludedPodCount != 2 {
-		t.Errorf("ExcludedPodCount = %d, want 2", summary.ExcludedPodCount)
-	}
-}
-
-// 同じシードなら、抜き出される Pod の集合と順が同じになる。
-func TestBuildInputVersion_SameSeedProducesSameSample(t *testing.T) {
-	nodesCSV1 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
-	nodesCSV2 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
-
-	events1, _, err := BuildInputVersion(nodesCSV1, tenEligiblePodsCSV(), 42, 1.0, 0.8)
-	if err != nil {
-		t.Fatalf("BuildInputVersion returned error: %v", err)
-	}
-	events2, _, err := BuildInputVersion(nodesCSV2, tenEligiblePodsCSV(), 42, 1.0, 0.8)
-	if err != nil {
-		t.Fatalf("BuildInputVersion returned error: %v", err)
-	}
-
-	names1 := jobCreateNames(events1)
-	names2 := jobCreateNames(events2)
-	if !slices.Equal(names1, names2) {
-		t.Errorf("same seed produced different samples: %v vs %v", names1, names2)
-	}
-}
-
-// sixPodsAtTheSameCreationTimeCSV returns six pods sharing creation_time 0,
-// plus one anchor pod far away in time so the submission period is not
-// zero (BuildInputVersion requires that to compute rho). The anchor's
-// creation_time never collides with the group of six, so it does not
-// affect which of the six pods tie for the same submission time.
 func sixPodsAtTheSameCreationTimeCSV() *strings.Reader {
 	var b strings.Builder
 	b.WriteString(podsCSVHeader)
@@ -316,6 +498,27 @@ func sixPodsAtTheSameCreationTimeCSV() *strings.Reader {
 	return strings.NewReader(b.String())
 }
 
+// 同じシードなら、使う Pod の順が同じになる。
+func TestBuildInputVersion_SameSeedProducesSameOrder(t *testing.T) {
+	nodesCSV1 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	nodesCSV2 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+
+	events1, _, err := BuildInputVersion(nodesCSV1, tenEligiblePodsCSV(), 42, 0.0001, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+	events2, _, err := BuildInputVersion(nodesCSV2, tenEligiblePodsCSV(), 42, 0.0001, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	names1 := jobCreateNames(events1)
+	names2 := jobCreateNames(events2)
+	if !slices.Equal(names1, names2) {
+		t.Errorf("same seed produced different orders: %v vs %v", names1, names2)
+	}
+}
+
 // 同じ creation_time の Pod は、間隔0で同じ時刻に投入されるが、シードで
 // 投入の順が並べ替えられる。
 func TestBuildInputVersion_ShufflesOrderOfSameCreationTime(t *testing.T) {
@@ -323,15 +526,15 @@ func TestBuildInputVersion_ShufflesOrderOfSameCreationTime(t *testing.T) {
 	nodesCSV2 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	nodesCSV3 := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 
-	eventsSeed1a, _, err := BuildInputVersion(nodesCSV1, sixPodsAtTheSameCreationTimeCSV(), 1, 1.0, 1.0)
+	eventsSeed1a, _, err := BuildInputVersion(nodesCSV1, sixPodsAtTheSameCreationTimeCSV(), 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
-	eventsSeed1b, _, err := BuildInputVersion(nodesCSV3, sixPodsAtTheSameCreationTimeCSV(), 1, 1.0, 1.0)
+	eventsSeed1b, _, err := BuildInputVersion(nodesCSV3, sixPodsAtTheSameCreationTimeCSV(), 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
-	eventsSeed2, _, err := BuildInputVersion(nodesCSV2, sixPodsAtTheSameCreationTimeCSV(), 2, 1.0, 1.0)
+	eventsSeed2, _, err := BuildInputVersion(nodesCSV2, sixPodsAtTheSameCreationTimeCSV(), 2, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -351,18 +554,19 @@ func TestBuildInputVersion_ShufflesOrderOfSameCreationTime(t *testing.T) {
 // Pod は creation_time の間隔で投入される。evaluator はイベントに付けた
 // interval をそのイベント自身の発火の前に足す（イベント自身の待ち時間であり、
 // 次のイベントまでの待ち時間ではない）ので、最初の Pod の interval は0、
-// それ以降は直前の Pod との creation_time の差になる。この CSV の ρ はちょうど
-// 0.9375（0.9375は 1000*1000*3 / (32000*100) の cpu の ρ）になるので、
-// targetRho に同じ値を渡せば倍率が1になり、間隔はそのまま creation_time
-// の差になる。
+// それ以降は直前の Pod との creation_time の差になる。この CSV は、実行時間
+// 10sが投入期間[0,100]への重なり（pod0は100、pod1は70、pod2は0）より短い
+// ので重なりが実行時間で飽和し、cpuのρ(倍率1)=1000*(10+10)/(32000*100)=
+// 0.00625になる。targetRho に同じ値を渡せば倍率が1になり、間隔はそのまま
+// creation_time の差になる。
 func TestBuildInputVersion_SubmissionIntervalIsCreationTimeGap(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n" +
-		"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n" +
-		"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n")
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,10,0\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,30,40,30\n" +
+		"openb-pod-0002,1000,1024,0,0,,LS,Running,100,110,100\n")
 
-	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.9375, 1.0)
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.00625, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -387,38 +591,123 @@ func TestBuildInputVersion_SubmissionIntervalIsCreationTimeGap(t *testing.T) {
 	}
 }
 
-func approxEqual(a, b, epsilon float64) bool {
-	diff := a - b
-	if diff < 0 {
-		diff = -diff
-	}
-	return diff <= epsilon
-}
+// ===== 定義 A の ρ と倍率 =====
 
-// ρ は、資源ごとの要求量×実行時間の合計を容量の合計×投入期間で割った値の
-// 最大値である。倍率をかけた後の ρ は、目標の ρ に一致する。
-func TestBuildInputVersion_RhoBeforeAndAfterScaling(t *testing.T) {
-	// 1ノード（cpu=32000m, mem=262144Mi）、3つのPod（各cpu=1000m,
-	// mem=1024Mi、実行時間1000s）、creation_timeは0, 30, 100（投入期間
-	// 100s）。手で求めたcpuのρ = 1000*1000*3 / (32000*100) = 0.9375、
-	// memのρ = 1024*1000*3 / (262144*100) ≈ 0.01172 なので、最大は
-	// cpuの0.9375になる。
-	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+// ρ の需要は、各Podの実行時間そのものではなく、投入の時刻から実行時間だけ
+// 続く区間のうち投入期間に重なる長さを使う（glossary の定義A）。この CSV
+// では pod0 の実行時間は1000sだが、投入期間は[0,100]で、pod0 の creation_time
+// (0) から投入期間の終わり(100)までは100sしかないので、重なりは実行時間
+// 1000sではなく100sになる。もし重なりを考えず実行時間そのものを使うと
+// cpuのρは1000*1000/(1000*100)=10.0になってしまうが、重なりを使うと
+// 1000*100/(1000*100)=1.0になる。
+func TestBuildInputVersion_DemandIsClampedToOverlapWithSubmissionPeriod(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,1000,0,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n" +
-		"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n" +
-		"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n")
+		"openb-pod-0000,1000,0,0,0,,LS,Running,0,1000,0\n" +
+		"openb-pod-0001,1000,0,0,0,,LS,Running,100,101,100\n")
 
-	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.1, 1.0)
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
 
-	if !approxEqual(summary.RhoBeforeScaling, 0.9375, 1e-9) {
-		t.Errorf("RhoBeforeScaling = %v, want 0.9375", summary.RhoBeforeScaling)
+	if !approxEqual(summary.RhoBeforeScaling.CPUMilli, 1.0, 1e-9) {
+		t.Errorf("RhoBeforeScaling.CPUMilli = %v, want 1.0 (not 10.0, which is what an unclamped duration would give)", summary.RhoBeforeScaling.CPUMilli)
 	}
-	if !approxEqual(summary.RhoAfterScaling, 1.1, 1e-9) {
-		t.Errorf("RhoAfterScaling = %v, want 1.1", summary.RhoAfterScaling)
+}
+
+// ρ は資源ごとに求め、最大の値をとる。この CSV では、cpu・メモリの比は
+// 無視できるほど小さく、GPU の比（割合での要求を切り上げずに使う。pod0・pod1
+// はどちらも num_gpu=2, gpu_milli=1000 なので実効GPUは2.0で、実行時間10sが
+// 投入期間[0,100]に完全に重なる）が最大になる: gpuのρ = 2.0*(10+10) /
+// (2*100) = 0.2。
+func TestBuildInputVersion_RhoIsDrivenByGPUWhenItIsTheBottleneck(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,2,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1,1,2,1000,,LS,Running,0,10,0\n" +
+		"openb-pod-0001,1,1,2,1000,,LS,Running,50,60,50\n" +
+		"openb-pod-anchor,1,1,0,0,,LS,Running,100,100,100\n")
+
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.4, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+	if !approxEqual(summary.RhoBeforeScaling.GPU, 0.2, 1e-9) {
+		t.Errorf("RhoBeforeScaling.GPU = %v, want 0.2", summary.RhoBeforeScaling.GPU)
+	}
+	if !approxEqual(summary.RhoAfterScaling.GPU, 0.4, 1e-6) {
+		t.Errorf("RhoAfterScaling.GPU = %v, want 0.4 (the target)", summary.RhoAfterScaling.GPU)
+	}
+	if !approxEqual(summary.Multiplier, 0.5, 1e-6) {
+		t.Errorf("Multiplier = %v, want 0.5", summary.Multiplier)
+	}
+}
+
+// 倍率をかけた後のρは、目標のρに一致する（重なりが実行時間で飽和している、
+// つまり倍率で圧縮しても実行時間のほうが先に効いてこない範囲での単純な例）。
+// pod0・pod1はどちらもcpu=1000, 実行時間10sで、投入期間[0,100]のうち
+// pod0の重なりは100、pod1は50（実行時間10sより大きいので実行時間10sで
+// 飽和）。cpuのρ(倍率1) = 1000*(10+10) / (10000*100) = 0.02。
+func TestBuildInputVersion_RhoBeforeAndAfterScaling(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,10000,0,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,0,0,0,,LS,Running,0,10,0\n" +
+		"openb-pod-0001,1000,0,0,0,,LS,Running,50,60,50\n" +
+		"openb-pod-anchor,1000,0,0,0,,LS,Running,100,100,100\n")
+
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.05, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	if !approxEqual(summary.RhoBeforeScaling.CPUMilli, 0.02, 1e-9) {
+		t.Errorf("RhoBeforeScaling.CPUMilli = %v, want 0.02", summary.RhoBeforeScaling.CPUMilli)
+	}
+	if !approxEqual(summary.RhoAfterScaling.CPUMilli, 0.05, 1e-6) {
+		t.Errorf("RhoAfterScaling.CPUMilli = %v, want 0.05 (the target)", summary.RhoAfterScaling.CPUMilli)
+	}
+	if !approxEqual(summary.Multiplier, 0.4, 1e-6) {
+		t.Errorf("Multiplier = %v, want 0.4", summary.Multiplier)
+	}
+}
+
+// ρ を求める容量は、すべてのノードの容量の合計である。
+func TestBuildInputVersion_RhoUsesCapacitySummedAcrossNodes(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader +
+		"openb-node-0000,5000,0,0,\n" +
+		"openb-node-0001,5000,0,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,0,0,0,,LS,Running,0,10,0\n" +
+		"openb-pod-0001,1000,0,0,0,,LS,Running,50,60,50\n" +
+		"openb-pod-anchor,1000,0,0,0,,LS,Running,100,100,100\n")
+
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.05, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+	if !approxEqual(summary.RhoBeforeScaling.CPUMilli, 0.02, 1e-9) {
+		t.Errorf("RhoBeforeScaling.CPUMilli = %v, want 0.02", summary.RhoBeforeScaling.CPUMilli)
+	}
+}
+
+// 縮めたクラスタでも目標のρに届かないときは、定義Aの重なりによる頭打ち
+// （spec.mdの決まり7が1213台のρについて述べているのと同じ現象）が起きて
+// いることが伝わるエラーで返す。このCSVでは、重なりが実行時間で飽和しない
+// 倍率の範囲（倍率が小さいほど重なりが小さくなる）で頭打ちの値（0.15）が
+// 目標(1.0)より低い。
+func TestBuildInputVersion_ErrorsOnUnreachableTargetRho(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,10000,0,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,0,0,0,,LS,Running,0,10,0\n" +
+		"openb-pod-0001,1000,0,0,0,,LS,Running,50,60,50\n" +
+		"openb-pod-anchor,1000,0,0,0,,LS,Running,100,100,100\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for an unreachable target rho")
+	}
+	if !strings.Contains(err.Error(), "unreachable") {
+		t.Errorf("error = %q, want it to say the target rho is unreachable", err)
 	}
 }
 
@@ -444,7 +733,7 @@ func TestBuildInputVersion_PendingPodWithEmptyScheduledTimeDoesNotError(t *testi
 		"openb-pod-running,1000,1024,0,0,,LS,Running,0,100,10\n" +
 		"openb-pod-running2,1000,1024,0,0,,LS,Running,50,150,60\n")
 
-	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -453,8 +742,130 @@ func TestBuildInputVersion_PendingPodWithEmptyScheduledTimeDoesNotError(t *testi
 	}
 }
 
-// sampleRatio が0〜1の範囲を外れると、不正な入力としてエラーを返す。
-func TestBuildInputVersion_ErrorsOnSampleRatioOutOfRange(t *testing.T) {
+// すべての Pod が Pending だと使う Pod が0件になるが、これは正当な入力
+// なのでエラーにはせず、件数とρがすべて0になる。
+func TestBuildInputVersion_AllPodsPendingUsesNoPods(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Pending,0,100,\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Pending,50,150,\n")
+
+	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	if summary.UsedPodCount != 0 {
+		t.Errorf("UsedPodCount = %d, want 0", summary.UsedPodCount)
+	}
+	if len(jobCreateNames(events)) != 0 {
+		t.Errorf("job create events = %v, want none", jobCreateNames(events))
+	}
+	if summary.RhoBeforeScaling.Max() != 0 {
+		t.Errorf("RhoBeforeScaling = %+v, want all 0", summary.RhoBeforeScaling)
+	}
+	if summary.RhoAfterScaling.Max() != 0 {
+		t.Errorf("RhoAfterScaling = %+v, want all 0", summary.RhoAfterScaling)
+	}
+}
+
+// scheduled_time が空になるのは openb の実データでは Pending の Pod だけ
+// なので、Pending 以外の行で空だったら（データが壊れている）エラーにする。
+func TestBuildInputVersion_ErrorsOnEmptyScheduledTimeForNonPendingPod(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a non-Pending pod with empty scheduled_time")
+	}
+}
+
+// 複数の Pod があっても creation_time がすべて同じだと投入期間が0になり、
+// ρ を求められない。根拠の無い0ではなく、エラーとして返す。
+func TestBuildInputVersion_ErrorsOnZeroSubmissionPeriod(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,0,100,10\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a zero submission period")
+	}
+}
+
+// 使う Pod があるのに、どのノードもどの資源の容量も0だと、ρ の分母が0に
+// なって求められない。容量が無いことが伝わるエラーで返す。使う Pod の
+// 要求もすべて0にして、置けないPodのエラー（U02の別の検査）より先にこの
+// エラーに当たるようにする。
+func TestBuildInputVersion_ErrorsOnZeroNodeCapacity(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader +
+		"openb-node-0000,0,0,0,\n" +
+		"openb-node-0001,0,0,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,0,0,0,0,,LS,Running,0,100,10\n" +
+		"openb-pod-0001,0,0,0,0,,LS,Running,50,150,60\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for nodes without any capacity")
+	}
+	if !strings.Contains(err.Error(), "no node has any capacity") {
+		t.Errorf("error = %q, want it to say that no node has any capacity", err)
+	}
+}
+
+// 使う Pod があるのに要求量×重なりの合計がどの資源でも0だと、ρ が
+// 根拠無く0になり、倍率0で投入の間隔がすべて0の入力の版が目標の ρ を
+// 満たしたように見えてしまう。これはエラーで返す。
+func TestBuildInputVersion_ErrorsOnZeroDemand(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	// deletion_time と scheduled_time が同じなので、どの Pod も実行時間0。
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,10,10\n" +
+		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,60,60\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a zero total demand")
+	}
+}
+
+// ===== 置けない Pod =====
+
+// 縮めたクラスタのどのノードの容量も超える要求のPodがあれば、入力の版を
+// 作る時点でエラーにする。
+func TestBuildInputVersion_ErrorsOnPodExceedingEveryNodeCapacity(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,1000,1024,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader + "openb-pod-0000,2000,1024,0,0,,LS,Running,0,100,10\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a pod exceeding every node's cpu capacity")
+	}
+	if !strings.Contains(err.Error(), "openb-pod-0000") {
+		t.Errorf("error = %q, want it to name the pod", err)
+	}
+}
+
+// 容量不足はGPUの枚数でも検査する。CPU・メモリが収まっても、GPUの枚数が
+// どのノードの容量も超えればエラーにする。
+func TestBuildInputVersion_ErrorsOnPodExceedingEveryNodeGPUCount(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,1,V100M16\n")
+	podsCSV := strings.NewReader(podsCSVHeader + "openb-pod-0000,1000,1024,2,1000,,LS,Running,0,100,10\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a pod exceeding every node's gpu count")
+	}
+}
+
+// ===== パラメータの検証 =====
+
+// nodeShrinkRatio が0〜1の範囲を外れると、不正な入力としてエラーを返す。
+func TestBuildInputVersion_ErrorsOnNodeShrinkRatioOutOfRange(t *testing.T) {
 	for _, ratio := range []float64{-0.5, 1.5} {
 		nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 		podsCSV := strings.NewReader(podsCSVHeader +
@@ -482,10 +893,9 @@ func TestBuildInputVersion_ErrorsOnNonPositiveTargetRho(t *testing.T) {
 	}
 }
 
-// sampleRatio が NaN だと、どの比較も偽になって範囲の検査をすり抜け、
-// Pod を1件も使わない空の入力の版が成功として返ってしまう。NaN は
-// 範囲を外れた値として、エラーで返す。
-func TestBuildInputVersion_ErrorsOnNaNSampleRatio(t *testing.T) {
+// nodeShrinkRatio が NaN だと、どの比較も偽になって範囲の検査をすり抜けて
+// しまう。NaN は範囲を外れた値として、エラーで返す。
+func TestBuildInputVersion_ErrorsOnNaNNodeShrinkRatio(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
 		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
@@ -493,12 +903,11 @@ func TestBuildInputVersion_ErrorsOnNaNSampleRatio(t *testing.T) {
 
 	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, math.NaN())
 	if err == nil {
-		t.Fatal("BuildInputVersion returned no error for a NaN sampleRatio")
+		t.Fatal("BuildInputVersion returned no error for a NaN nodeShrinkRatio")
 	}
 }
 
-// 目標の ρ が NaN だと、倍率も NaN になり、投入の間隔がすべて0の入力の版が
-// 成功として返ってしまう。NaN は正でない値として、エラーで返す。
+// 目標の ρ が NaN だと、不正な値として、エラーで返す。
 func TestBuildInputVersion_ErrorsOnNaNTargetRho(t *testing.T) {
 	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
@@ -511,101 +920,17 @@ func TestBuildInputVersion_ErrorsOnNaNTargetRho(t *testing.T) {
 	}
 }
 
-// 複数の Pod があっても creation_time がすべて同じだと投入期間が0になり、
-// ρ を求められない。根拠の無い0ではなく、エラーとして返す。
-func TestBuildInputVersion_ErrorsOnZeroSubmissionPeriod(t *testing.T) {
-	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
-	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
-		"openb-pod-0001,1000,1024,0,0,,LS,Running,0,100,10\n")
+// ===== CSV のパース =====
 
-	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
-	if err == nil {
-		t.Fatal("BuildInputVersion returned no error for a zero submission period")
-	}
-}
-
-// 使う Pod があるのに、どのノードもどの資源の容量も0だと、ρ の分母が0に
-// なって求められない。容量が無いことが伝わるエラーで返す。
-func TestBuildInputVersion_ErrorsOnZeroNodeCapacity(t *testing.T) {
-	nodesCSV := strings.NewReader(nodesCSVHeader +
-		"openb-node-0000,0,0,0,\n" +
-		"openb-node-0001,0,0,0,\n")
-	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,10\n" +
-		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
-
-	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
-	if err == nil {
-		t.Fatal("BuildInputVersion returned no error for nodes without any capacity")
-	}
-	if !strings.Contains(err.Error(), "no node has any capacity") {
-		t.Errorf("error = %q, want it to say that no node has any capacity", err)
-	}
-}
-
-// 使う Pod があるのに要求量×実行時間の合計がどの資源でも0だと、ρ が
-// 根拠無く0になり、倍率0で投入の間隔がすべて0の入力の版が目標の ρ を
-// 満たしたように見えてしまう。これはエラーで返す。
-func TestBuildInputVersion_ErrorsOnZeroDemand(t *testing.T) {
-	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
-	// deletion_time と scheduled_time が同じなので、どの Pod も実行時間0。
-	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,10,10\n" +
-		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,60,60\n")
-
-	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
-	if err == nil {
-		t.Fatal("BuildInputVersion returned no error for a zero total demand")
-	}
-}
-
-// sampleRatio=0 は使う Pod が0件になる境界だが、これは「負荷のない入力」
-// として正当なのでエラーにはせず、件数とρがすべて0になる。
-func TestBuildInputVersion_SampleRatioZeroUsesNoPods(t *testing.T) {
-	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
-	podsCSV := tenEligiblePodsCSV()
-
-	events, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 0.0)
-	if err != nil {
-		t.Fatalf("BuildInputVersion returned error: %v", err)
-	}
-
-	if summary.UsedPodCount != 0 {
-		t.Errorf("UsedPodCount = %d, want 0", summary.UsedPodCount)
-	}
-	if len(jobCreateNames(events)) != 0 {
-		t.Errorf("job create events = %v, want none", jobCreateNames(events))
-	}
-	if summary.RhoBeforeScaling != 0 {
-		t.Errorf("RhoBeforeScaling = %v, want 0", summary.RhoBeforeScaling)
-	}
-	if summary.RhoAfterScaling != 0 {
-		t.Errorf("RhoAfterScaling = %v, want 0", summary.RhoAfterScaling)
-	}
-}
-
-// scheduled_time が空になるのは openb の実データでは Pending の Pod だけ
-// なので、Pending 以外の行で空だったら（データが壊れている）エラーにする。
-func TestBuildInputVersion_ErrorsOnEmptyScheduledTimeForNonPendingPod(t *testing.T) {
-	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
-	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,100,\n")
-
-	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
-	if err == nil {
-		t.Fatal("BuildInputVersion returned no error for a non-Pending pod with empty scheduled_time")
-	}
-}
-
-// buildInputVersionJob が作る Job の資源の要求は、CSV の値どおりになる。
-func TestBuildInputVersion_JobResourceRequestsMatchCSV(t *testing.T) {
-	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,2,\n")
+// buildInputVersionJob が作る Job の cpu・メモリの要求は、CSV の値どおりに
+// なる。
+func TestBuildInputVersion_JobCPUMemoryRequestsMatchCSV(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,3,\n")
 	podsCSV := strings.NewReader(podsCSVHeader +
 		"openb-pod-0000,1234,5678,3,0,,LS,Running,0,100,10\n" +
 		"openb-pod-0001,1000,1024,0,0,,LS,Running,50,150,60\n")
 
-	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	events, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.0001, 1.0)
 	if err != nil {
 		t.Fatalf("BuildInputVersion returned error: %v", err)
 	}
@@ -621,54 +946,6 @@ func TestBuildInputVersion_JobResourceRequestsMatchCSV(t *testing.T) {
 	if got := requests.Memory().Value(); got != 5678*1024*1024 {
 		t.Errorf("memory request = %d bytes, want %d bytes", got, 5678*1024*1024)
 	}
-	gpu := requests[corev1.ResourceName("nvidia.com/gpu")]
-	if got := gpu.Value(); got != 3 {
-		t.Errorf("gpu request = %d, want 3", got)
-	}
-}
-
-// ρ は資源ごとの比の最大値なので、GPU の比が cpu・メモリより大きいときは
-// GPU の比になる。
-func TestBuildInputVersion_RhoIsDrivenByGPUWhenItIsTheBottleneck(t *testing.T) {
-	// ノードはcpu=32000m, mem=262144Mi, gpu=2。2つのPod（各cpu=100m,
-	// mem=100Mi, num_gpu=2、実行時間1000s、creation_timeは0と100で投入
-	// 期間100s）だと、cpuのρ=100*1000*2/(32000*100)=0.0625、memのρ=
-	// 100*1000*2/(262144*100)≈0.000763、gpuのρ=2*1000*2/(2*100)=20.0に
-	// なり、最大はgpuになる。
-	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,2,\n")
-	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,100,100,2,0,,LS,Running,0,1000,0\n" +
-		"openb-pod-0001,100,100,2,0,,LS,Running,100,1100,100\n")
-
-	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 20.0, 1.0)
-	if err != nil {
-		t.Fatalf("BuildInputVersion returned error: %v", err)
-	}
-	if !approxEqual(summary.RhoBeforeScaling, 20.0, 1e-9) {
-		t.Errorf("RhoBeforeScaling = %v, want 20.0", summary.RhoBeforeScaling)
-	}
-}
-
-// ρ を求める容量は、すべてのノードの容量の合計である。
-func TestBuildInputVersion_RhoUsesCapacitySummedAcrossNodes(t *testing.T) {
-	// 2ノード（各cpu=16000m, mem=131072Mi）の合計はcpu=32000m,
-	// mem=262144Miで、TestBuildInputVersion_RhoBeforeAndAfterScalingの
-	// 1ノード版と同じ容量になる。同じPodを使えば、同じρ=0.9375になる。
-	nodesCSV := strings.NewReader(nodesCSVHeader +
-		"openb-node-0000,16000,131072,0,\n" +
-		"openb-node-0001,16000,131072,0,\n")
-	podsCSV := strings.NewReader(podsCSVHeader +
-		"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n" +
-		"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n" +
-		"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n")
-
-	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.1, 1.0)
-	if err != nil {
-		t.Fatalf("BuildInputVersion returned error: %v", err)
-	}
-	if !approxEqual(summary.RhoBeforeScaling, 0.9375, 1e-9) {
-		t.Errorf("RhoBeforeScaling = %v, want 0.9375", summary.RhoBeforeScaling)
-	}
 }
 
 // 数値であるべき列が数字でない Pod の行は、エラーで返す。
@@ -680,6 +957,18 @@ func TestBuildInputVersion_ErrorsOnNonNumericPodField(t *testing.T) {
 	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err == nil {
 		t.Fatal("BuildInputVersion returned no error for a non-numeric cpu_milli")
+	}
+}
+
+// gpu_milli が数字でない Pod の行も、エラーで返す。
+func TestBuildInputVersion_ErrorsOnNonNumericGPUMilliField(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,32000,262144,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,1024,1,not-a-number,,LS,Running,0,100,10\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a non-numeric gpu_milli")
 	}
 }
 
