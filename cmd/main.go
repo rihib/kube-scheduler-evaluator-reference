@@ -20,13 +20,14 @@ func main() {
 			consts.EtcdURL,
 			false, // disable externalMode
 			consts.SlogLevel,
+			evaluator.WithRecordOutputDir("log"),
 		),
 		evaluator.WithMetricStores(
 			definition.NewMetricStore(definition.VictoriaMetrics, "http://localhost:8428"),
 		),
-		// scenarioName, iteration, scenarioGenerator, schedulerRegistry, schedulerOptions
-		evaluator.WithScenario(example.Name, 3, example.Generator, nil),
-		evaluator.WithScenario(clusterdata.Name, 1, clusterdata.Generator, nil), // alibaba clusterdata gpu2023
+		// scenarioName, iteration, scenarioGenerator, schedulerRegistry, runIdentity, schedulerOptions
+		evaluator.WithScenario(example.Name, 3, example.Generator, nil, definition.RunIdentity{}),
+		evaluator.WithScenario(clusterdata.Name, 1, clusterdata.Generator, nil, definition.RunIdentity{}), // alibaba clusterdata gpu2023
 	)
 	if err != nil {
 		panic(err)

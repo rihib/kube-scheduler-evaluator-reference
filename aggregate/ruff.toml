@@ -1,0 +1,4 @@
+# ruff の設定（この集計コードだけに効く。リポジトリ本体は Go で、Python は
+# ここにしか無い）。run_tests.sh が `ruff check` と `ruff format --check` を
+# 流すので、既定の 88 桁ではなく、このコードが実際に書かれている幅に合わせる。
+line-length = 143
