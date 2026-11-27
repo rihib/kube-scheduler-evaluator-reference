@@ -32,19 +32,20 @@ import (
 )
 
 // traceName identifies the input trace in the transition record's header
-// (decisions.md: "入力の情報は、トレースの名前と版..."). This command only runs
-// against the openb trace.
+// (experiment1-pilot's units/U03.md: "入力の情報は、トレースの名前と版、変換
+// 規則の版（reference のコミット）、入力の版のシード、ρ である"). This
+// command only runs against the openb trace.
 const traceName = "openb"
 
 // schedulerProfile describes, for the transition record's header
-// (decisions.md: "スケジューラの情報は..."), the scheduler this command runs.
-// It is a constant rather than a flag because the command passes no
-// scheduler.Option (see run), so the only profile it can ever run is
-// kube-scheduler's default one: a flag could only make the header disagree
-// with what actually ran, and aggregate/aggregate.py groups runs by this
-// string to diff one scheduler against another. A command that runs a
-// specific profile (FGD, Tetris, ...) takes this description from the code
-// that configures that profile.
+// (experiment1-pilot's units/U03.md: "スケジューラの情報は、profile の設定で
+// ある"), the scheduler this command runs. It is a constant rather than a
+// flag because the command passes no scheduler.Option (see run), so the only
+// profile it can ever run is kube-scheduler's default one: a flag could only
+// make the header disagree with what actually ran, and aggregate/aggregate.py
+// groups runs by this string to diff one scheduler against another. A command
+// that runs a specific profile (FGD, Tetris, ...) takes this description from
+// the code that configures that profile.
 const schedulerProfile = "default kube-scheduler profile"
 
 func main() {
