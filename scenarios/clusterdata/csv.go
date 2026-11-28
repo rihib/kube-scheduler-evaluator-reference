@@ -12,53 +12,22 @@ import (
 )
 
 // parseNodeRecords reads the openb node CSV from r and builds a Node and a
-// Create event for every row, since both the full openb scenario
-// (nodeGenerator, which streams these events to a channel) and
-// BuildInputVersion (which uses all nodes) need the same parsing.
-//
-// sn,cpu_milli,memory_mib,gpu,model
-// openb-node-0229,96000,786432,8,V100M32
+// Create event for every row, for the full openb scenario (nodeGenerator,
+// which streams these events to a channel). It reuses parseNodeCSVRecords
+// for the actual CSV reading, so the two node-CSV readers (this one and
+// BuildInputVersion's) do not duplicate the reading loop; the only thing
+// this one adds is turning each typed record into a Node (via buildNode,
+// gpu2023.go's nvidia.com/gpu representation) and a Create event.
 func parseNodeRecords(r io.Reader) ([]*corev1.Node, []definition.Event, error) {
-	reader := csv.NewReader(r)
-	reader.FieldsPerRecord = -1
-	reader.TrimLeadingSpace = true
+	records, err := parseNodeCSVRecords(r)
+	if err != nil {
+		return nil, nil, err
+	}
 
-	var (
-		nodes  []*corev1.Node
-		events []definition.Event
-	)
-	for {
-		record, err := reader.Read()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("clusterdata: node csv read error: %w", err)
-		}
-		if len(record) < 5 {
-			return nil, nil, fmt.Errorf("clusterdata: malformed node record (len=%d)", len(record))
-		}
-
-		serverName := strings.TrimSpace(record[0])
-		if strings.EqualFold(serverName, "sn") {
-			continue
-		}
-
-		cpuMilli, err := parseIntField(record[1], "cpu_milli")
-		if err != nil {
-			return nil, nil, err
-		}
-		memoryMiB, err := parseIntField(record[2], "memory_mib")
-		if err != nil {
-			return nil, nil, err
-		}
-		gpuCount, err := parseIntField(record[3], "gpu")
-		if err != nil {
-			return nil, nil, err
-		}
-		model := strings.TrimSpace(record[4])
-
-		node := buildNode(serverName, cpuMilli, memoryMiB, gpuCount, model)
+	nodes := make([]*corev1.Node, 0, len(records))
+	events := make([]definition.Event, 0, len(records))
+	for _, rec := range records {
+		node := buildNode(rec.name, rec.cpuMilli, rec.memoryMiB, rec.gpuCount, rec.model)
 		nodes = append(nodes, node)
 		events = append(events, definition.NewEvent(definition.EventTypeCreate, node, defaultInterval))
 	}
@@ -147,6 +116,34 @@ func parseNodeCSVRecords(r io.Reader) ([]openbNodeRecord, error) {
 	}
 
 	return records, nil
+}
+
+// FilterGPUNodes reads an openb node CSV from r and returns a new CSV
+// containing only its header and the rows whose gpu field is greater than
+// 0. openb only publishes one node list, covering every node whether or
+// not it has a GPU (openb_node_list_all_node.csv), but spec.md's decision 8
+// and units/U02.md build input versions from "GPU のあるノードの一覧"
+// specifically (1213 of that file's 1523 rows); BuildInputVersion itself
+// stays usable with any node list (a mix of GPU and non-GPU nodes is valid
+// input for it, and several of its own tests use CPU/memory-only nodes), so
+// callers that want the GPU-only openb list, such as cmd/buildinput, filter
+// it with this function first.
+func FilterGPUNodes(r io.Reader) (io.Reader, error) {
+	records, err := parseNodeCSVRecords(r)
+	if err != nil {
+		return nil, err
+	}
+
+	var b strings.Builder
+	b.WriteString("sn,cpu_milli,memory_mib,gpu,model\n")
+	for _, n := range records {
+		if n.gpuCount <= 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "%s,%d,%d,%d,%s\n", n.name, n.cpuMilli, n.memoryMiB, n.gpuCount, n.model)
+	}
+
+	return strings.NewReader(b.String()), nil
 }
 
 // parseInputVersionPods reads the openb pod CSV from podsCSV into typed
