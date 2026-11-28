@@ -11,15 +11,22 @@ import (
 	"testing"
 )
 
+// gpu=1: cmd/buildinput filters the node CSV to GPU-having nodes before
+// building the input version (spec.md's decision 8), so a node with gpu=0
+// would never reach BuildInputVersion and the pods below (which don't
+// request any GPU) would have no node to fit.
 const nodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
-	"openb-node-0000,32000,262144,0,\n"
+	"openb-node-0000,1000,1048576,1,V100M16\n"
 
-// creation_time 0, 30, 100 (投入期間100s), 実行時間1000sの3Podで、cpuのρは
-// 1000*1000*3 / (32000*100) = 0.9375 になる。
+// creation_time 0, 20, 40 (投入期間100s、100で終わるpod-0003は重なりが無く
+// 需要に効かない), 実行時間10sの3Podが実行時間で飽和する（gapが100,80,60と
+// 実行時間10sより大きい）ので、cpuのρ(倍率1) = 1000*(10+10+10) /
+// (1000*100) = 0.3 になる。
 const podsCSV = "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n" +
-	"openb-pod-0000,1000,1024,0,0,,LS,Running,0,1000,0\n" +
-	"openb-pod-0001,1000,1024,0,0,,LS,Running,30,1030,30\n" +
-	"openb-pod-0002,1000,1024,0,0,,LS,Running,100,1100,100\n"
+	"openb-pod-0000,1000,1,0,0,,LS,Running,0,10,0\n" +
+	"openb-pod-0001,1000,1,0,0,,LS,Running,20,30,20\n" +
+	"openb-pod-0002,1000,1,0,0,,LS,Running,40,50,40\n" +
+	"openb-pod-0003,1000,1,0,0,,LS,Running,100,110,100\n"
 
 func writeTempCSV(t *testing.T, name, content string) string {
 	t.Helper()
@@ -30,8 +37,9 @@ func writeTempCSV(t *testing.T, name, content string) string {
 	return path
 }
 
-// 本番と同じ形の引数で動かすと、使ったPodの件数・除いた件数・Failedの件数・
-// 倍率をかける前と後のρが表示される。
+// 本番と同じ形の引数で動かすと、選んだノードの台数と形ごとの台数・使った
+// Podの件数・除いたPendingの件数・Failedの件数・倍率・倍率をかける前と後の
+// ρが表示される。
 func TestRun_PrintsSummary(t *testing.T) {
 	nodesPath := writeTempCSV(t, "nodes.csv", nodesCSV)
 	podsPath := writeTempCSV(t, "pods.csv", podsCSV)
@@ -42,7 +50,7 @@ func TestRun_PrintsSummary(t *testing.T) {
 		"--pods=" + podsPath,
 		"--seed=1",
 		"--rho=1.1",
-		"--ratio=1.0",
+		"--shrink=1.0",
 	}, &stdout, &stderr)
 
 	if code != 0 {
@@ -50,10 +58,11 @@ func TestRun_PrintsSummary(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"used pods:     3",
-		"excluded pods: 0",
-		"failed pods:   0",
-		"rho (after):   1.100000",
+		"selected nodes: 1",
+		"used pods:       4",
+		"excluded pending: 0",
+		"failed pods:     0",
+		"max=1.100000",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout = %q, want it to contain %q", out, want)
@@ -76,7 +85,7 @@ func TestRun_WritesInputVersionToOutPath(t *testing.T) {
 		"--pods=" + podsPath,
 		"--seed=1",
 		"--rho=1.1",
-		"--ratio=1.0",
+		"--shrink=1.0",
 		"--out=" + outPath,
 	}, &stdout, &stderr)
 
@@ -88,9 +97,9 @@ func TestRun_WritesInputVersionToOutPath(t *testing.T) {
 		t.Fatalf("failed to read %s: %v", outPath, err)
 	}
 	lines := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
-	// 1つのノードの Create、3つの Pod の Create、そのノードの Delete。
-	if len(lines) != 5 {
-		t.Fatalf("input version has %d line(s), want 5:\n%s", len(lines), content)
+	// 1つのノードの Create、4つの Pod の Create、そのノードの Delete。
+	if len(lines) != 6 {
+		t.Fatalf("input version has %d line(s), want 6:\n%s", len(lines), content)
 	}
 	types := make([]string, 0, len(lines))
 	for i, line := range lines {

@@ -69,8 +69,8 @@ func run(
 
 	nodesPath := fs.String("nodes", ".cache/clusterdata/openb_node_list_all_node.csv", "openb node list CSV")
 	podsPath := fs.String("pods", ".cache/clusterdata/openb_pod_list_default.csv", "openb pod list CSV")
-	seed := fs.Int64("seed", 1, "seed for sampling and ordering pods")
-	sampleRatio := fs.Float64("ratio", 0.8, "fraction of non-Pending pods to keep")
+	seed := fs.Int64("seed", 1, "seed for choosing which nodes of each shape to keep, and for ordering pods")
+	nodeShrinkRatio := fs.Float64("shrink", 0.05, "fraction of each node shape to keep (every shape keeps at least one node)")
 	targetRho := fs.Float64("rho", 1.0, "target rho the submission intervals are scaled to reach")
 	iterations := fs.Int("iterations", 1, "number of times to repeat the run")
 	outDir := fs.String("out", "records", "directory each run's transition record is written to")
@@ -123,8 +123,19 @@ func run(
 		return 2
 	}
 
+	// openb's node list covers every node, GPU or not. spec.md's decision 8
+	// and units/U02.md build input versions from the GPU-only subset of it
+	// (1213 of 1523 nodes), so filter it before BuildInputVersion sees it,
+	// the same way cmd/buildinput does: both commands must build the same
+	// cluster out of the same flags.
+	gpuNodes, err := clusterdata.FilterGPUNodes(strings.NewReader(string(nodesCSV)))
+	if err != nil {
+		fmt.Fprintf(stderr, "run: %v\n", err)
+		return 1
+	}
+
 	events, _, err := clusterdata.BuildInputVersion(
-		strings.NewReader(string(nodesCSV)), strings.NewReader(string(podsCSV)), *seed, *targetRho, *sampleRatio,
+		gpuNodes, strings.NewReader(string(podsCSV)), *seed, *targetRho, *nodeShrinkRatio,
 	)
 	if err != nil {
 		fmt.Fprintf(stderr, "run: %v\n", err)

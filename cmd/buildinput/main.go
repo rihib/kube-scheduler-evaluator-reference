@@ -31,9 +31,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	nodesPath := fs.String("nodes", ".cache/clusterdata/openb_node_list_all_node.csv", "openb node list CSV")
 	podsPath := fs.String("pods", ".cache/clusterdata/openb_pod_list_default.csv", "openb pod list CSV")
-	seed := fs.Int64("seed", 1, "seed for sampling and ordering pods")
+	seed := fs.Int64("seed", 1, "seed for choosing which nodes of each shape to keep, and for ordering pods")
 	targetRho := fs.Float64("rho", 1.0, "target rho the submission intervals are scaled to reach")
-	sampleRatio := fs.Float64("ratio", 0.8, "fraction of non-Pending pods to keep")
+	nodeShrinkRatio := fs.Float64("shrink", 0.05, "fraction of each node shape to keep (every shape keeps at least one node)")
 	outPath := fs.String("out", "", "path to write the input version itself to, as JSON Lines (empty: only print the summary)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -46,6 +46,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	defer nodesFile.Close()
 
+	// openb's node list covers every node, GPU or not. spec.md's decision 8
+	// and units/U02.md build input versions from the GPU-only subset of it
+	// (1213 of 1523 nodes), so filter it before BuildInputVersion sees it.
+	gpuNodes, err := clusterdata.FilterGPUNodes(nodesFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "buildinput: %v\n", err)
+		return 1
+	}
+
 	podsFile, err := os.Open(*podsPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "buildinput: %v\n", err)
@@ -53,7 +62,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	defer podsFile.Close()
 
-	events, summary, err := clusterdata.BuildInputVersion(nodesFile, podsFile, *seed, *targetRho, *sampleRatio)
+	events, summary, err := clusterdata.BuildInputVersion(gpuNodes, podsFile, *seed, *targetRho, *nodeShrinkRatio)
 	if err != nil {
 		fmt.Fprintf(stderr, "buildinput: %v\n", err)
 		return 1
@@ -66,11 +75,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	fmt.Fprintf(stdout, "used pods:     %d\n", summary.UsedPodCount)
-	fmt.Fprintf(stdout, "excluded pods: %d\n", summary.ExcludedPodCount)
-	fmt.Fprintf(stdout, "failed pods:   %d\n", summary.FailedPodCount)
-	fmt.Fprintf(stdout, "rho (before):  %.6f\n", summary.RhoBeforeScaling)
-	fmt.Fprintf(stdout, "rho (after):   %.6f\n", summary.RhoAfterScaling)
+	fmt.Fprintf(stdout, "selected nodes: %d\n", summary.SelectedNodeCount)
+	for _, shape := range summary.NodeShapes {
+		fmt.Fprintf(stdout, "  gpu=%d model=%q cpu=%dm memory=%dMi: %d\n", shape.GPUCount, shape.Model, shape.CPUMilli, shape.MemoryMiB, shape.Count)
+	}
+	fmt.Fprintf(stdout, "used pods:       %d\n", summary.UsedPodCount)
+	fmt.Fprintf(stdout, "excluded pending: %d\n", summary.ExcludedPendingPodCount)
+	fmt.Fprintf(stdout, "failed pods:     %d\n", summary.FailedPodCount)
+	fmt.Fprintf(stdout, "multiplier:      %.6f\n", summary.Multiplier)
+	fmt.Fprintf(stdout, "submission period: %s\n", summary.SubmissionPeriod)
+	fmt.Fprintf(stdout, "rho (before): cpu=%.6f memory=%.6f gpu=%.6f max=%.6f\n",
+		summary.RhoBeforeScaling.CPUMilli, summary.RhoBeforeScaling.MemoryMiB, summary.RhoBeforeScaling.GPU, summary.RhoBeforeScaling.Max())
+	fmt.Fprintf(stdout, "rho (after):  cpu=%.6f memory=%.6f gpu=%.6f max=%.6f\n",
+		summary.RhoAfterScaling.CPUMilli, summary.RhoAfterScaling.MemoryMiB, summary.RhoAfterScaling.GPU, summary.RhoAfterScaling.Max())
 	return 0
 }
 

@@ -79,8 +79,11 @@ func TestScenarioID_DiffersByRho(t *testing.T) {
 	}
 }
 
+// このコマンドが作る入力の版は、GPU のあるノードだけのクラスタ
+// （units/U02.md の「GPU のあるノードの一覧（1213台）」）なので、テストの
+// ノードも GPU を持つ行にする。
 const runTestNodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
-	"openb-node-0000,32000,262144,0,\n"
+	"openb-node-0000,32000,262144,8,V100M16\n"
 
 // pods CSV のファイル名（".csv" を除く）が definition.RunIdentity.TraceVersion
 // (main.go の traceVersion) になり、traceName ("openb") で始まる必要がある
@@ -164,8 +167,8 @@ func TestRun_WritesOneRunPerIteration(t *testing.T) {
 		"--nodes=" + nodesPath,
 		"--pods=" + podsPath,
 		"--seed=1",
-		"--ratio=1.0",
-		"--rho=0.5",
+		"--shrink=1.0",
+		"--rho=0.03",
 		"--iterations=3",
 	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
 	if code != 0 {
@@ -194,8 +197,8 @@ func TestRun_WritesOneRunPerIteration(t *testing.T) {
 		if got, _ := input["input_seed"].(string); got != "1" {
 			t.Errorf("input.input_seed = %q, want %q", got, "1")
 		}
-		if got, _ := input["rho"].(float64); got != 0.5 {
-			t.Errorf("input.rho = %v, want 0.5", got)
+		if got, _ := input["rho"].(float64); got != 0.03 {
+			t.Errorf("input.rho = %v, want 0.03", got)
 		}
 		sched, _ := r.header["scheduler"].(map[string]any)
 		if sched == nil {
@@ -209,6 +212,40 @@ func TestRun_WritesOneRunPerIteration(t *testing.T) {
 		if r.transitionLines == 0 {
 			t.Errorf("run with header %v recorded no transitions", r.header)
 		}
+	}
+}
+
+// openb のノードの一覧は GPU の無いノードも含むが、このコマンドが作る入力の
+// 版は GPU のあるノードだけのクラスタである（spec.md の決まり8、units/U02.md の
+// 「GPU のあるノードの一覧（1213台）」）。GPU の無い大きなノードと GPU のある
+// 小さなノードが混ざった一覧を渡し、小さなノードには載らない Pod を入れると、
+// GPU の無いノードが落ちていれば「どのノードの容量も超える」として作る時点で
+// エラーになり、落ちていなければそのまま実行できてしまう。
+func TestRun_BuildsInputVersionFromGPUNodesOnly(t *testing.T) {
+	nodesPath := writeTempCSV(t, "nodes.csv", "sn,cpu_milli,memory_mib,gpu,model\n"+
+		"openb-node-cpu-only,64000,524288,0,\n"+
+		"openb-node-gpu,8000,65536,2,V100M16\n")
+	podsPath := writeTempCSV(t, runTestPodsFile, "name,cpu_milli,memory_mib,num_gpu,gpu_milli,gpu_spec,qos,pod_phase,creation_time,deletion_time,scheduled_time\n"+
+		"openb-pod-cpu-heavy,16000,1024,0,0,,LS,Running,0,1000,0\n"+
+		"openb-pod-small,1000,1024,0,0,,LS,Running,30,1030,30\n")
+	store := &fakeRecordStore{}
+
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--nodes=" + nodesPath,
+		"--pods=" + podsPath,
+		"--seed=1",
+		"--shrink=1.0",
+		"--rho=0.03",
+	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })
+	if code == 0 {
+		t.Fatalf("exit code = 0, want nonzero: the CPU-only node was used as if it were part of the cluster")
+	}
+	if !strings.Contains(stderr.String(), "openb-pod-cpu-heavy") {
+		t.Errorf("stderr = %q, want it to name the pod that fits no GPU node", stderr.String())
+	}
+	if len(store.runs) != 0 {
+		t.Errorf("run count = %d, want 0", len(store.runs))
 	}
 }
 
