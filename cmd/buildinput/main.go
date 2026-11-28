@@ -46,6 +46,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	defer nodesFile.Close()
 
+	// openb's node list covers every node, GPU or not. spec.md's decision 8
+	// and units/U02.md build input versions from the GPU-only subset of it
+	// (1213 of 1523 nodes), so filter it before BuildInputVersion sees it.
+	gpuNodes, err := clusterdata.FilterGPUNodes(nodesFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "buildinput: %v\n", err)
+		return 1
+	}
+
 	podsFile, err := os.Open(*podsPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "buildinput: %v\n", err)
@@ -53,7 +62,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	defer podsFile.Close()
 
-	events, summary, err := clusterdata.BuildInputVersion(nodesFile, podsFile, *seed, *targetRho, *nodeShrinkRatio)
+	events, summary, err := clusterdata.BuildInputVersion(gpuNodes, podsFile, *seed, *targetRho, *nodeShrinkRatio)
 	if err != nil {
 		fmt.Fprintf(stderr, "buildinput: %v\n", err)
 		return 1

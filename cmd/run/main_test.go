@@ -164,7 +164,7 @@ func TestRun_WritesOneRunPerIteration(t *testing.T) {
 		"--nodes=" + nodesPath,
 		"--pods=" + podsPath,
 		"--seed=1",
-		"--ratio=1.0",
+		"--shrink=1.0",
 		"--rho=0.03",
 		"--iterations=3",
 	}, &stderr, store.factory, func() (string, error) { return "fake-reference-commit", nil })

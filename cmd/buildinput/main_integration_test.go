@@ -11,8 +11,12 @@ import (
 	"testing"
 )
 
+// gpu=1: cmd/buildinput filters the node CSV to GPU-having nodes before
+// building the input version (spec.md's decision 8), so a node with gpu=0
+// would never reach BuildInputVersion and the pods below (which don't
+// request any GPU) would have no node to fit.
 const nodesCSV = "sn,cpu_milli,memory_mib,gpu,model\n" +
-	"openb-node-0000,1000,1048576,0,\n"
+	"openb-node-0000,1000,1048576,1,V100M16\n"
 
 // creation_time 0, 20, 40 (投入期間100s、100で終わるpod-0003は重なりが無く
 // 需要に効かない), 実行時間10sの3Podが実行時間で飽和する（gapが100,80,60と
