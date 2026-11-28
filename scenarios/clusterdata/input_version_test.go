@@ -669,6 +669,12 @@ func TestBuildInputVersion_RhoBeforeAndAfterScaling(t *testing.T) {
 	if !approxEqual(summary.Multiplier, 0.4, 1e-6) {
 		t.Errorf("Multiplier = %v, want 0.4", summary.Multiplier)
 	}
+	// 投入期間は、倍率をかける前の100sではなく、倍率(0.4)をかけた後の
+	// 40sになる。入力の版が実際に投入される期間はこちら。二分探索で求めた
+	// 倍率はぴったり0.4ではないので、1ミリ秒の許容誤差で比べる。
+	if diff := summary.SubmissionPeriod - 40*time.Second; diff > time.Millisecond || diff < -time.Millisecond {
+		t.Errorf("SubmissionPeriod = %v, want ~40s (period 100s scaled by the multiplier 0.4)", summary.SubmissionPeriod)
+	}
 }
 
 // ρ を求める容量は、すべてのノードの容量の合計である。
@@ -687,6 +693,74 @@ func TestBuildInputVersion_RhoUsesCapacitySummedAcrossNodes(t *testing.T) {
 	}
 	if !approxEqual(summary.RhoBeforeScaling.CPUMilli, 0.02, 1e-9) {
 		t.Errorf("RhoBeforeScaling.CPUMilli = %v, want 0.02", summary.RhoBeforeScaling.CPUMilli)
+	}
+}
+
+// 資源ごとのρはメモリでも同じ式で求まる。cpuとgpuの容量は十分大きくして
+// 比を無視できるほど小さくし、メモリだけを逼迫させる。pod0・pod1はどちらも
+// memory=1000, 実行時間10sで、投入期間[0,100]のうちpod0の重なりは100、
+// pod1は50（実行時間10sより大きいので実行時間10sで飽和）。メモリのρ
+// (倍率1) = 1000*(10+10) / (10000*100) = 0.02。
+func TestBuildInputVersion_RhoBeforeAndAfterScaling_Memory(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,1000000,10000,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1,1000,0,0,,LS,Running,0,10,0\n" +
+		"openb-pod-0001,1,1000,0,0,,LS,Running,50,60,50\n" +
+		"openb-pod-anchor,1,1000,0,0,,LS,Running,100,100,100\n")
+
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.05, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	if !approxEqual(summary.RhoBeforeScaling.MemoryMiB, 0.02, 1e-9) {
+		t.Errorf("RhoBeforeScaling.MemoryMiB = %v, want 0.02", summary.RhoBeforeScaling.MemoryMiB)
+	}
+	if !approxEqual(summary.RhoAfterScaling.MemoryMiB, 0.05, 1e-6) {
+		t.Errorf("RhoAfterScaling.MemoryMiB = %v, want 0.05 (the target)", summary.RhoAfterScaling.MemoryMiB)
+	}
+}
+
+// 目標のρが今のρより低いときは、倍率を1より大きくして投入期間を伸ばす
+// 側に探索する。TestBuildInputVersion_RhoBeforeAndAfterScalingと同じCSV
+// (cpuのρ(倍率1)=0.02)に、それより低い目標(0.01)を渡すと、飽和した重なり
+// のまま期間だけが伸びるので、倍率は0.02/0.01=2.0になる。
+func TestBuildInputVersion_MultiplierCanExceedOneWhenTargetIsBelowCurrentRho(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,10000,0,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,0,0,0,,LS,Running,0,10,0\n" +
+		"openb-pod-0001,1000,0,0,0,,LS,Running,50,60,50\n" +
+		"openb-pod-anchor,1000,0,0,0,,LS,Running,100,100,100\n")
+
+	_, summary, err := BuildInputVersion(nodesCSV, podsCSV, 1, 0.01, 1.0)
+	if err != nil {
+		t.Fatalf("BuildInputVersion returned error: %v", err)
+	}
+
+	if !approxEqual(summary.Multiplier, 2.0, 1e-6) {
+		t.Errorf("Multiplier = %v, want 2.0 (greater than 1)", summary.Multiplier)
+	}
+	if !approxEqual(summary.RhoAfterScaling.CPUMilli, 0.01, 1e-6) {
+		t.Errorf("RhoAfterScaling.CPUMilli = %v, want 0.01 (the target)", summary.RhoAfterScaling.CPUMilli)
+	}
+}
+
+// 目標のρが極端に低いと、理屈のうえでは届く倍率があっても、探索の上限
+// (findMultiplierのmaxHigh)を超えてしまう。この安全装置が働いて、無限に
+// 倍率を伸ばし続けずにエラーで返す。
+func TestBuildInputVersion_ErrorsWhenMultiplierWouldExceedSearchLimit(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,10000,0,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader +
+		"openb-pod-0000,1000,0,0,0,,LS,Running,0,10,0\n" +
+		"openb-pod-0001,1000,0,0,0,,LS,Running,50,60,50\n" +
+		"openb-pod-anchor,1000,0,0,0,,LS,Running,100,100,100\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1e-20, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a target rho requiring a multiplier beyond the search limit")
+	}
+	if !strings.Contains(err.Error(), "could not find a multiplier") {
+		t.Errorf("error = %q, want it to say a multiplier could not be found", err)
 	}
 }
 
@@ -850,6 +924,21 @@ func TestBuildInputVersion_ErrorsOnPodExceedingEveryNodeCapacity(t *testing.T) {
 	}
 }
 
+// 容量不足はメモリだけでも検査する。CPU・GPUが収まっても、メモリが
+// どのノードの容量も超えればエラーにする。
+func TestBuildInputVersion_ErrorsOnPodExceedingEveryNodeMemory(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,2000,1024,0,\n")
+	podsCSV := strings.NewReader(podsCSVHeader + "openb-pod-0000,1000,2048,0,0,,LS,Running,0,100,10\n")
+
+	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
+	if err == nil {
+		t.Fatal("BuildInputVersion returned no error for a pod exceeding every node's memory capacity")
+	}
+	if !strings.Contains(err.Error(), "openb-pod-0000") {
+		t.Errorf("error = %q, want it to name the pod", err)
+	}
+}
+
 // 容量不足はGPUの枚数でも検査する。CPU・メモリが収まっても、GPUの枚数が
 // どのノードの容量も超えればエラーにする。
 func TestBuildInputVersion_ErrorsOnPodExceedingEveryNodeGPUCount(t *testing.T) {
@@ -981,5 +1070,37 @@ func TestBuildInputVersion_ErrorsOnNonNumericNodeField(t *testing.T) {
 	_, _, err := BuildInputVersion(nodesCSV, podsCSV, 1, 1.0, 1.0)
 	if err == nil {
 		t.Fatal("BuildInputVersion returned no error for a non-numeric node cpu_milli")
+	}
+}
+
+// ===== FilterGPUNodes =====
+
+// FilterGPUNodes は、gpu が0以下の行を落とし、gpu が1以上の行だけを残す。
+func TestFilterGPUNodes_KeepsOnlyNodesWithGPUs(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader +
+		"openb-node-cpu-only,32000,262144,0,\n" +
+		"openb-node-gpu,32000,262144,2,V100M16\n")
+
+	filtered, err := FilterGPUNodes(nodesCSV)
+	if err != nil {
+		t.Fatalf("FilterGPUNodes returned error: %v", err)
+	}
+
+	records, err := parseNodeCSVRecords(filtered)
+	if err != nil {
+		t.Fatalf("parseNodeCSVRecords could not read the filtered CSV: %v", err)
+	}
+	if len(records) != 1 || records[0].name != "openb-node-gpu" {
+		t.Fatalf("filtered records = %+v, want only openb-node-gpu", records)
+	}
+}
+
+// 数値であるべき列が数字でないノードの行は、FilterGPUNodes もエラーで返す。
+func TestFilterGPUNodes_ErrorsOnNonNumericField(t *testing.T) {
+	nodesCSV := strings.NewReader(nodesCSVHeader + "openb-node-0000,not-a-number,262144,1,\n")
+
+	_, err := FilterGPUNodes(nodesCSV)
+	if err == nil {
+		t.Fatal("FilterGPUNodes returned no error for a non-numeric cpu_milli")
 	}
 }
