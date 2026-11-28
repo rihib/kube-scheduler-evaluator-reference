@@ -80,7 +80,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "  gpu=%d model=%q cpu=%dm memory=%dMi: %d\n", shape.GPUCount, shape.Model, shape.CPUMilli, shape.MemoryMiB, shape.Count)
 	}
 	fmt.Fprintf(stdout, "used pods:       %d\n", summary.UsedPodCount)
-	fmt.Fprintf(stdout, "excluded pending:%d\n", summary.ExcludedPendingPodCount)
+	fmt.Fprintf(stdout, "excluded pending: %d\n", summary.ExcludedPendingPodCount)
 	fmt.Fprintf(stdout, "failed pods:     %d\n", summary.FailedPodCount)
 	fmt.Fprintf(stdout, "multiplier:      %.6f\n", summary.Multiplier)
 	fmt.Fprintf(stdout, "submission period: %s\n", summary.SubmissionPeriod)

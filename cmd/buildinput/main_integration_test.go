@@ -60,7 +60,7 @@ func TestRun_PrintsSummary(t *testing.T) {
 	for _, want := range []string{
 		"selected nodes: 1",
 		"used pods:       4",
-		"excluded pending:0",
+		"excluded pending: 0",
 		"failed pods:     0",
 		"max=1.100000",
 	} {

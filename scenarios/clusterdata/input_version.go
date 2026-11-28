@@ -64,14 +64,7 @@ type ResourceRho struct {
 
 // Max is rho itself: the maximum of the three resources' ratios.
 func (r ResourceRho) Max() float64 {
-	max := r.CPUMilli
-	if r.MemoryMiB > max {
-		max = r.MemoryMiB
-	}
-	if r.GPU > max {
-		max = r.GPU
-	}
-	return max
+	return max(r.CPUMilli, r.MemoryMiB, r.GPU)
 }
 
 // InputVersionSummary describes how BuildInputVersion turned the openb
