@@ -123,8 +123,19 @@ func run(
 		return 2
 	}
 
+	// openb's node list covers every node, GPU or not. spec.md's decision 8
+	// and units/U02.md build input versions from the GPU-only subset of it
+	// (1213 of 1523 nodes), so filter it before BuildInputVersion sees it,
+	// the same way cmd/buildinput does: both commands must build the same
+	// cluster out of the same flags.
+	gpuNodes, err := clusterdata.FilterGPUNodes(strings.NewReader(string(nodesCSV)))
+	if err != nil {
+		fmt.Fprintf(stderr, "run: %v\n", err)
+		return 1
+	}
+
 	events, _, err := clusterdata.BuildInputVersion(
-		strings.NewReader(string(nodesCSV)), strings.NewReader(string(podsCSV)), *seed, *targetRho, *nodeShrinkRatio,
+		gpuNodes, strings.NewReader(string(podsCSV)), *seed, *targetRho, *nodeShrinkRatio,
 	)
 	if err != nil {
 		fmt.Fprintf(stderr, "run: %v\n", err)
