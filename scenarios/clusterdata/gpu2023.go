@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,8 +15,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 )
 
 const Name = "gpu2023"
@@ -83,35 +80,20 @@ func nodeGenerator(ch chan<- definition.Event) ([]*corev1.Node, error) {
 	return nodes, nil
 }
 
+// buildNode builds a Node whose GPUs (if any) are the nvidia.com/gpu
+// extended resource, the representation gpu2023.go's full openb pipeline
+// uses. It shares buildNodeBase/finalizeNodeCapacity with
+// buildInputVersionNode (input_version.go), which instead represents GPUs
+// with the alibabacloud.com/* capacity keys (decisions.md's "GPU の
+// annotation の形"); everything else about a Node (CPU/memory capacity, the
+// model label, ObjectMeta, GVK) is common to both and lives in those two
+// helpers.
 func buildNode(name string, cpuMilli, memoryMiB, gpuCount int64, model string) *corev1.Node {
-	capacity := corev1.ResourceList{
-		corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%dm", cpuMilli)),
-		corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", memoryMiB)),
-		corev1.ResourcePods:   resource.MustParse("110"),
-	}
+	node := buildNodeBase(name, cpuMilli, memoryMiB, model)
 	if gpuCount > 0 {
-		capacity[corev1.ResourceName("nvidia.com/gpu")] = resource.MustParse(fmt.Sprintf("%d", gpuCount))
+		node.Status.Capacity[corev1.ResourceName("nvidia.com/gpu")] = resource.MustParse(fmt.Sprintf("%d", gpuCount))
 	}
-	allocatable := make(corev1.ResourceList, len(capacity))
-	maps.Copy(allocatable, capacity)
-
-	modelLabelKey := fmt.Sprintf("%s/model", consts.UserID)
-	labels := map[string]string{}
-	if model != "" {
-		labels[modelLabelKey] = model
-	}
-
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
-			Labels: labels,
-		},
-		Status: corev1.NodeStatus{
-			Capacity:    capacity,
-			Allocatable: allocatable,
-		},
-	}
-	node.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Node"))
+	finalizeNodeCapacity(node)
 	return node
 }
 
@@ -246,65 +228,30 @@ func podGenerator(ch chan<- definition.Event, schedulerName string) error {
 	return nil
 }
 
+// buildJob builds the ReplicaSet for a pod whose GPU request (if any) is
+// the nvidia.com/gpu extended resource plus gpu2023's own gpu-milli
+// annotation, the representation gpu2023.go's full openb pipeline uses. It
+// shares buildJobBase with buildInputVersionJob (input_version.go), which
+// instead represents GPUs with the alibabacloud.com/* annotations
+// (decisions.md's "GPU の annotation の形"); everything else about the Job
+// (ObjectMeta, Selector, deadline/execution-duration/qos/gpu-spec
+// annotations, the container's cpu/memory Requests/Limits) is common to
+// both and lives in that helper.
 func buildJob(
 	schedulerName, podName string,
 	cpuMilli, memoryMiB, gpuCount, gpuMilli int64,
 	gpuSpec, qos string,
 	executionDuration time.Duration,
 ) *appsv1.ReplicaSet {
-	podLabels := map[string]string{"app": "example-app"}
-	deadline := executionDuration * 2
+	job := buildJobBase(schedulerName, podName, cpuMilli, memoryMiB, gpuSpec, qos, executionDuration)
+
 	gpuMilliAnnotationKey := fmt.Sprintf("%s/gpu-milli", consts.UserID)
-	gpuSpecAnnotationKey := fmt.Sprintf("%s/gpu-spec", consts.UserID)
-	qosAnnotationKey := fmt.Sprintf("%s/qos", consts.UserID)
-	job := &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      podName,
-			Namespace: "default",
-			Annotations: map[string]string{
-				definition.DeadlineDurationAnnotationKey(consts.UserID): deadline.String(),
-			},
-		},
-		Spec: appsv1.ReplicaSetSpec{
-			Replicas: ptr.To[int32](1),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: podLabels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: podLabels,
-					Annotations: map[string]string{
-						definition.ExecutionDurationAnnotationKey(consts.UserID): executionDuration.String(),
-						gpuMilliAnnotationKey: fmt.Sprintf("%d", gpuMilli),
-						gpuSpecAnnotationKey:  gpuSpec,
-						qosAnnotationKey:      qos,
-					},
-				},
-				Spec: corev1.PodSpec{
-					SchedulerName: schedulerName,
-					Containers: []corev1.Container{
-						{
-							Name:  "example-job",
-							Image: "registry.example.com/example-job:1.0",
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%dm", cpuMilli)),
-									corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", memoryMiB)),
-									"nvidia.com/gpu":      resource.MustParse(fmt.Sprintf("%d", gpuCount)),
-								},
-								Limits: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%dm", cpuMilli)),
-									corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", memoryMiB)),
-									"nvidia.com/gpu":      resource.MustParse(fmt.Sprintf("%d", gpuCount)),
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	job.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))
+	job.Spec.Template.Annotations[gpuMilliAnnotationKey] = fmt.Sprintf("%d", gpuMilli)
+
+	gpuQuantity := resource.MustParse(fmt.Sprintf("%d", gpuCount))
+	job.Spec.Template.Spec.Containers[0].Resources.Requests["nvidia.com/gpu"] = gpuQuantity
+	job.Spec.Template.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"] = gpuQuantity
+
 	return job
 }
 

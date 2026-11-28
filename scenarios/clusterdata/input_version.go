@@ -14,8 +14,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 )
 
 // alibabacloudGPUMilliKey and alibabacloudGPUCountKey are the pod
@@ -88,9 +86,12 @@ type InputVersionSummary struct {
 	ExcludedPendingPodCount int
 	FailedPodCount          int
 	Multiplier              float64
-	SubmissionPeriod        time.Duration
-	RhoBeforeScaling        ResourceRho
-	RhoAfterScaling         ResourceRho
+	// SubmissionPeriod is the input version's actual submission period
+	// (after Multiplier has scaled it), not the openb trace's original
+	// period.
+	SubmissionPeriod time.Duration
+	RhoBeforeScaling ResourceRho
+	RhoAfterScaling  ResourceRho
 }
 
 // BuildInputVersion reads the openb node and pod CSVs and produces one
@@ -192,9 +193,15 @@ func BuildInputVersion(
 		ExcludedPendingPodCount: len(allPods) - len(eligible),
 		FailedPodCount:          failedCount,
 		Multiplier:              multiplier,
-		SubmissionPeriod:        time.Duration(periodBeforeScaling) * time.Second,
-		RhoBeforeScaling:        rhoBeforeScaling,
-		RhoAfterScaling:         rhoAfterScaling,
+		// Multiplying by multiplier before converting to a Duration (rather
+		// than converting periodBeforeScaling to a Duration first and then
+		// multiplying) keeps sub-second precision: time.Duration(x) floors
+		// x, so flooring whole seconds first can lose up to a full second
+		// once multiplier makes the scaled period fractional, the same
+		// reason buildInputVersionPodEvents scales before converting.
+		SubmissionPeriod: time.Duration(periodBeforeScaling * multiplier * float64(time.Second)),
+		RhoBeforeScaling: rhoBeforeScaling,
+		RhoAfterScaling:  rhoAfterScaling,
 	}
 
 	return events, summary, nil
@@ -202,8 +209,8 @@ func BuildInputVersion(
 
 // shrinkNodesByShape groups nodes by shape (nodeShapeKey) and keeps
 // round(len(shape)*nodeShrinkRatio) of each shape, chosen by rng, with
-// every shape keeping at least one node (decisions.md's 入力の版: どの形も
-// 最低1台残す). Shapes are visited in a fixed order (sorted by key) so
+// every shape keeping at least one node (spec.md's decision 8: どの形も、
+// 最低1台は残す). Shapes are visited in a fixed order (sorted by key) so
 // that, for a given seed, which nodes are kept does not depend on the CSV's
 // row order.
 func shrinkNodesByShape(nodes []openbNodeRecord, nodeShrinkRatio float64, rng *rand.Rand) ([]openbNodeRecord, []NodeShapeSummary) {
@@ -278,9 +285,10 @@ func orderPods(pods []openbPodRecord, rng *rand.Rand) []openbPodRecord {
 }
 
 // checkPodsFitSomeNode returns an error naming the first pod whose request
-// (CPU, memory, GPU count) exceeds every node in nodes. decisions.md's 入力
-// の版 treats this as a defensive check: with every shape keeping at least
-// one node, it should not normally trigger, but if it did go unchecked, the
+// (CPU, memory, GPU count) exceeds every node in nodes. units/U02.md's
+// Implementation Decisions treats this as a defensive check: with every
+// shape keeping at least one node (spec.md's decision 8), it should not
+// normally trigger, but if it did go unchecked, the
 // pod would stay pending for the rest of the run and evaluator would fail
 // at the scenario's finish event instead of at input-version build time.
 func checkPodsFitSomeNode(pods []openbPodRecord, nodes []openbNodeRecord) error {
@@ -502,39 +510,15 @@ func inputVersionNodeDeleteEvents(nodes []*corev1.Node) []definition.Event {
 // capacity (gpuCount*1000, a whole node's GPUs are never shared), both as
 // capacity/allocatable resources under the alibabacloud.com keys, instead
 // of the nvidia.com/gpu extended resource buildNode (gpu2023.go's full
-// openb pipeline) uses.
+// openb pipeline) uses. It shares buildNodeBase/finalizeNodeCapacity with
+// buildNode; see node_job_builders.go.
 func buildInputVersionNode(n openbNodeRecord) *corev1.Node {
-	capacity := corev1.ResourceList{
-		corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%dm", n.cpuMilli)),
-		corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", n.memoryMiB)),
-		corev1.ResourcePods:   resource.MustParse("110"),
-	}
+	node := buildNodeBase(n.name, n.cpuMilli, n.memoryMiB, n.model)
 	if n.gpuCount > 0 {
-		capacity[corev1.ResourceName(alibabacloudGPUCountKey)] = resource.MustParse(fmt.Sprintf("%d", n.gpuCount))
-		capacity[corev1.ResourceName(alibabacloudGPUMilliKey)] = resource.MustParse(fmt.Sprintf("%d", n.gpuCount*gpuMilliPerGPU))
+		node.Status.Capacity[corev1.ResourceName(alibabacloudGPUCountKey)] = resource.MustParse(fmt.Sprintf("%d", n.gpuCount))
+		node.Status.Capacity[corev1.ResourceName(alibabacloudGPUMilliKey)] = resource.MustParse(fmt.Sprintf("%d", n.gpuCount*gpuMilliPerGPU))
 	}
-	allocatable := make(corev1.ResourceList, len(capacity))
-	for name, qty := range capacity {
-		allocatable[name] = qty
-	}
-
-	modelLabelKey := fmt.Sprintf("%s/model", consts.UserID)
-	labels := map[string]string{}
-	if n.model != "" {
-		labels[modelLabelKey] = n.model
-	}
-
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   n.name,
-			Labels: labels,
-		},
-		Status: corev1.NodeStatus{
-			Capacity:    capacity,
-			Allocatable: allocatable,
-		},
-	}
-	node.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Node"))
+	finalizeNodeCapacity(node)
 	return node
 }
 
@@ -549,61 +533,14 @@ const gpuMilliPerGPU = 1000
 // gpu_milli field, uncapped per spec.md's decision 7, not rounded up to a
 // whole GPU) and a gpu-count, both as pod annotations under the
 // alibabacloud.com keys, instead of the nvidia.com/gpu extended resource
-// request buildJob (gpu2023.go's full openb pipeline) uses.
+// request buildJob (gpu2023.go's full openb pipeline) uses. It shares
+// buildJobBase with buildJob; see node_job_builders.go.
 func buildInputVersionJob(p openbPodRecord) *appsv1.ReplicaSet {
-	podLabels := map[string]string{"app": "example-app"}
 	executionDuration := time.Duration(p.deletionTime-p.scheduledTime) * time.Second
-	deadline := executionDuration * 2
-	gpuSpecAnnotationKey := fmt.Sprintf("%s/gpu-spec", consts.UserID)
-	qosAnnotationKey := fmt.Sprintf("%s/qos", consts.UserID)
+	job := buildJobBase("default-scheduler", p.name, p.cpuMilli, p.memoryMiB, p.gpuSpec, p.qos, executionDuration)
 
-	job := &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      p.name,
-			Namespace: "default",
-			Annotations: map[string]string{
-				definition.DeadlineDurationAnnotationKey(consts.UserID): deadline.String(),
-			},
-		},
-		Spec: appsv1.ReplicaSetSpec{
-			Replicas: ptr.To[int32](1),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: podLabels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: podLabels,
-					Annotations: map[string]string{
-						definition.ExecutionDurationAnnotationKey(consts.UserID): executionDuration.String(),
-						alibabacloudGPUMilliKey:                                  fmt.Sprintf("%d", p.gpuMilli),
-						alibabacloudGPUCountKey:                                  fmt.Sprintf("%d", p.gpuCount),
-						gpuSpecAnnotationKey:                                     p.gpuSpec,
-						qosAnnotationKey:                                         p.qos,
-					},
-				},
-				Spec: corev1.PodSpec{
-					SchedulerName: "default-scheduler",
-					Containers: []corev1.Container{
-						{
-							Name:  "example-job",
-							Image: "registry.example.com/example-job:1.0",
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%dm", p.cpuMilli)),
-									corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", p.memoryMiB)),
-								},
-								Limits: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%dm", p.cpuMilli)),
-									corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", p.memoryMiB)),
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	job.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))
+	job.Spec.Template.Annotations[alibabacloudGPUMilliKey] = fmt.Sprintf("%d", p.gpuMilli)
+	job.Spec.Template.Annotations[alibabacloudGPUCountKey] = fmt.Sprintf("%d", p.gpuCount)
 
 	if affinity := gpuSpecNodeAffinity(p.gpuSpec); affinity != nil {
 		job.Spec.Template.Spec.Affinity = affinity
